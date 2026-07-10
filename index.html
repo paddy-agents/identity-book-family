@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<title>Origin Stories — Family Preview</title>
+<style>
+  :root { --bg:#faf7f2; --card:#ffffff; --ink:#2d2a26; --accent:#8b5e3c; --accent2:#b98a5e; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:Georgia,'Times New Roman',serif; background:var(--bg); color:var(--ink);
+         min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:24px 16px 48px; }
+  header { text-align:center; margin:24px 0 8px; }
+  h1 { font-size:2rem; letter-spacing:.5px; }
+  .sub { font-family:-apple-system,BlinkMacSystemFont,sans-serif; color:#6b635a; margin-top:8px;
+         font-size:.95rem; max-width:34rem; line-height:1.5; }
+  main { width:100%; max-width:34rem; display:flex; flex-direction:column; gap:16px; margin-top:24px; }
+  .card { background:var(--card); border:1px solid #e8e0d5; border-radius:14px; padding:22px;
+          box-shadow:0 1px 4px rgba(0,0,0,.05); }
+  .card h2 { font-size:1.15rem; margin-bottom:8px; }
+  .card p { font-family:-apple-system,BlinkMacSystemFont,sans-serif; font-size:.92rem;
+            line-height:1.55; color:#4d463e; margin-bottom:14px; }
+  .btn { display:inline-block; background:var(--accent); color:#fff; text-decoration:none;
+         font-family:-apple-system,BlinkMacSystemFont,sans-serif; font-weight:600;
+         padding:12px 20px; border-radius:10px; font-size:.95rem; }
+  .btn.secondary { background:var(--accent2); }
+  .btn:active { opacity:.85; }
+  textarea { width:100%; min-height:110px; font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+             font-size:.95rem; padding:10px; border:1px solid #d8cec0; border-radius:10px;
+             background:#fffdf9; resize:vertical; margin-bottom:12px; }
+  footer { font-family:-apple-system,BlinkMacSystemFont,sans-serif; font-size:.78rem;
+           color:#9a9188; margin-top:36px; text-align:center; line-height:1.6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📖 Origin Stories</h1>
+  <p class="sub">A keepsake book app for telling children the story of how they came to be —
+  built a little more each day by Paddy's home AI agent. This page is the family window into it:
+  try the latest version, and send ideas to steer what gets built next.</p>
+</header>
+<main>
+  <div class="card">
+    <h2>✨ Try the latest app</h2>
+    <p>This is the real, current build — it updates as the agent ships new versions.
+    Everything you type stays on your own device (nothing is uploaded).</p>
+    <a class="btn" href="app/index.html">Open the app</a>
+  </div>
+  <div class="card">
+    <h2>💡 Send an idea or feedback</h2>
+    <p>Type a suggestion below, then tap the button — it opens an email to Paddy prefilled with
+    your note. He drops it straight into the agent's inbox, and it acts on it in its next run
+    (usually within a day).</p>
+    <textarea id="idea" placeholder="e.g. Add a page where grandparents can record a voice note…"></textarea>
+    <a class="btn secondary" id="send" href="#">Email this idea to Paddy</a>
+  </div>
+</main>
+<footer>
+  Family preview site · rebuilt each morning by the ops agent<br>
+  <span id="stamp"></span>
+</footer>
+<script>
+  document.getElementById('send').addEventListener('click', function (e) {
+    e.preventDefault();
+    var idea = document.getElementById('idea').value.trim() || '(wrote nothing — just saying hi)';
+    location.href = 'mailto:paddyboroughs@gmail.com'
+      + '?subject=' + encodeURIComponent('Origin Stories idea (for the identity-book agent)')
+      + '&body=' + encodeURIComponent(idea + '\n\n— sent from the family preview site');
+  });
+  fetch('last-sync.txt').then(function(r){return r.ok?r.text():''}).then(function(t){
+    if (t) document.getElementById('stamp').textContent = 'App last synced: ' + t.trim();
+  }).catch(function(){});
+</script>
+</body>
+</html>
