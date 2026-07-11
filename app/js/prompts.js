@@ -72,8 +72,15 @@ const FAMILY_FIELDS = [
   {
     id: 'childPhoto',
     label: "A photo of your child",
-    hint: 'Optional — appears on the cover of the book. Stays in your browser, never uploaded anywhere.',
+    hint: 'Optional — appears on the cover of the book. Stays in your browser, never uploaded anywhere. Skip it and we’ll use the avatar below instead.',
     type: 'photo',
+    required: false,
+  },
+  {
+    id: 'childAvatar',
+    label: "Build your child's look",
+    hint: 'A simple cartoon avatar, shown as a baby and with your family at the end of the book — and on the cover if you skip the photo above.',
+    type: 'avatar',
     required: false,
   },
   {

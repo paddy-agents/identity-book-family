@@ -84,7 +84,10 @@
     state.answers = {};
     state.titleTouched = false;
     state.previewIndex = 0;
-    [...els.storyTypes.children].forEach((card) => card.classList.remove('selected'));
+    [...els.storyTypes.children].forEach((card) => {
+      card.classList.remove('selected');
+      card.setAttribute('aria-pressed', 'false');
+    });
     els.formSection.hidden = true;
     if (els.savedNote) els.savedNote.hidden = true;
     delete document.body.dataset.theme;
@@ -99,6 +102,7 @@
       card.className = 'story-type-card';
       card.textContent = st.label;
       card.dataset.id = st.id;
+      card.setAttribute('aria-pressed', 'false');
       card.addEventListener('click', () => selectStoryType(st.id));
       els.storyTypes.appendChild(card);
     });
@@ -108,7 +112,9 @@
     state.storyType = id;
     state.previewIndex = 0;
     [...els.storyTypes.children].forEach((card) => {
-      card.classList.toggle('selected', card.dataset.id === id);
+      const isSelected = card.dataset.id === id;
+      card.classList.toggle('selected', isSelected);
+      card.setAttribute('aria-pressed', String(isSelected));
     });
 
     const st = STORY_TYPES.find((s) => s.id === id);
@@ -142,8 +148,22 @@
     return out;
   }
 
+  function ensureAvatarDefaults() {
+    if (!state.answers.childAvatar) {
+      state.answers.childAvatar = Object.assign({}, AvatarKit.DEFAULT_AVATAR);
+    }
+  }
+
   function renderFields() {
+    ensureAvatarDefaults();
     const fields = getVisibleFields();
+    // renderFields() rebuilds every field element from scratch, which would
+    // otherwise drop keyboard focus to <body> mid-interaction (e.g. right
+    // after changing "how many siblings" or "parents label" — both of
+    // which call this function from their own change handler). Restore
+    // focus to the same field id afterwards so keyboard/screen-reader users
+    // aren't dropped out of the form.
+    const focusedId = els.fields.contains(document.activeElement) ? document.activeElement.id : null;
     els.fields.innerHTML = '';
 
     fields.forEach((f) => {
@@ -164,6 +184,12 @@
 
       if (f.type === 'photo') {
         wrap.appendChild(buildPhotoUpload(f));
+        els.fields.appendChild(wrap);
+        return;
+      }
+
+      if (f.type === 'avatar') {
+        wrap.appendChild(buildAvatarBuilder(f));
         els.fields.appendChild(wrap);
         return;
       }
@@ -194,6 +220,11 @@
       wrap.appendChild(input);
       els.fields.appendChild(wrap);
     });
+
+    if (focusedId) {
+      const toFocus = document.getElementById(focusedId);
+      if (toFocus) toFocus.focus();
+    }
   }
 
   // Builds the file-input + thumbnail + remove-button control for a 'photo'
@@ -267,6 +298,96 @@
     reader.readAsDataURL(file);
   }
 
+  // Builds the swatch/style-button UI for the 'avatar' field. Every change
+  // updates state.answers.childAvatar in place, then re-renders the small
+  // thumbnail here plus the book preview — mirroring buildPhotoUpload's
+  // update pattern above.
+  function buildAvatarBuilder(f) {
+    ensureAvatarDefaults();
+    const avatar = state.answers.childAvatar;
+    const wrap = document.createElement('div');
+    wrap.className = 'avatar-builder';
+
+    const thumb = document.createElement('img');
+    thumb.className = 'avatar-thumb';
+    thumb.alt = "Preview of your child's avatar";
+    const refreshThumb = () => { thumb.src = AvatarKit.renderScene('face', avatar, 160, {}); };
+    refreshThumb();
+    wrap.appendChild(thumb);
+
+    function optionRow(label, options, key, className, render) {
+      const row = document.createElement('div');
+      row.className = 'avatar-row';
+      const rowLabel = document.createElement('span');
+      rowLabel.className = 'avatar-row-label';
+      rowLabel.textContent = label;
+      row.appendChild(rowLabel);
+      const group = document.createElement('div');
+      group.className = className;
+      options.forEach((opt) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        render(btn, opt);
+        btn.classList.toggle('selected', avatar[key] === opt.id);
+        btn.setAttribute('aria-pressed', String(avatar[key] === opt.id));
+        btn.addEventListener('click', () => {
+          avatar[key] = opt.id;
+          [...group.children].forEach((b) => {
+            b.classList.remove('selected');
+            b.setAttribute('aria-pressed', 'false');
+          });
+          btn.classList.add('selected');
+          btn.setAttribute('aria-pressed', 'true');
+          refreshThumb();
+          renderPreview();
+          saveProgress();
+        });
+        group.appendChild(btn);
+      });
+      row.appendChild(group);
+      return row;
+    }
+
+    wrap.appendChild(optionRow('Skin tone', AvatarKit.SKIN_TONES, 'skinTone', 'swatch-row', (btn, opt) => {
+      btn.className = 'swatch';
+      btn.style.background = opt.hex;
+      btn.setAttribute('aria-label', 'Skin tone: ' + opt.id);
+    }));
+    wrap.appendChild(optionRow('Hair style', AvatarKit.HAIR_STYLES, 'hairStyle', 'style-btn-row', (btn, opt) => {
+      btn.className = 'style-btn';
+      btn.textContent = opt.label;
+    }));
+    wrap.appendChild(optionRow('Hair color', AvatarKit.HAIR_COLORS, 'hairColor', 'swatch-row', (btn, opt) => {
+      btn.className = 'swatch';
+      btn.style.background = opt.hex;
+      btn.setAttribute('aria-label', 'Hair color: ' + opt.id);
+    }));
+    wrap.appendChild(optionRow('Eye color', AvatarKit.EYE_COLORS, 'eyeColor', 'swatch-row', (btn, opt) => {
+      btn.className = 'swatch';
+      btn.style.background = opt.hex;
+      btn.setAttribute('aria-label', 'Eye color: ' + opt.id);
+    }));
+
+    return wrap;
+  }
+
+  // Rasterizes the current avatar into a scene ('face' | 'baby' | 'family')
+  // at the given pixel size, themed to match the selected story type. Used
+  // by both renderPreview() (as an <img> src) and downloadBook() (as a
+  // jsPDF addImage source) — same PNG data URL either way.
+  function avatarSceneFor(kind, size) {
+    ensureAvatarDefaults();
+    const a = state.answers;
+    const theme = themeFor(state.storyType);
+    const parents = getParentsList(a);
+    const siblings = getSiblingNames(a);
+    return AvatarKit.renderScene(kind, a.childAvatar, size, {
+      theme: theme,
+      parentCount: parents.length,
+      siblingCount: siblings.length,
+    });
+  }
+
   function onFieldChange(f, input) {
     return () => {
       if (f.id === 'bookTitle') state.titleTouched = true;
@@ -290,7 +411,9 @@
 
   function getParentsList(a) {
     const raw = a.parentsLabel === 'Other' ? (a.parentsLabelCustom || '') : (a.parentsLabel || '');
-    return raw.split(/\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
+    // Custom entries commonly use "and", "&", or a comma to join caregivers
+    // (e.g. "Grandma and Grandpa", "Grandma & Grandpa", "Grandma, Grandpa").
+    return raw.split(/\s*,\s*|\s+&\s+|\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
   }
 
   function getSiblingNames(a) {
@@ -303,6 +426,7 @@
   }
 
   function buildPages() {
+    ensureAvatarDefaults();
     const a = state.answers;
     const st = STORY_TYPES.find((s) => s.id === state.storyType) || STORY_TYPES[0];
     const name = a.childName && a.childName.trim() ? a.childName.trim() : 'you';
@@ -320,7 +444,21 @@
     ];
 
     const pages = [];
-    pages.push({ kind: 'title', title: title, subtitle: 'A story for ' + name, motif: 'rainbow', photo: a.childPhoto || null });
+    pages.push({
+      kind: 'title',
+      title: title,
+      subtitle: 'A story for ' + name,
+      motif: 'rainbow',
+      photo: a.childPhoto || null,
+      useAvatar: !a.childPhoto,
+    });
+
+    pages.push({
+      kind: 'baby-portrait',
+      label: 'Here I was!',
+      text: name + ', ready for the world.',
+      motif: 'sparkle',
+    });
 
     pages.push({
       kind: 'text',
@@ -362,6 +500,13 @@
     }
 
     pages.push({ kind: 'text', text: 'Then, everyone headed home, eager to share their happy news with the whole family!', motif: 'house' });
+
+    pages.push({
+      kind: 'family-portrait',
+      label: 'Our family',
+      text: parentsPhrase + (siblings.length ? ', ' + joinWithAnd(siblings) : '') + ' — together with ' + name + ', always.',
+      motif: 'heart',
+    });
 
     if (a.promise && a.promise.trim()) {
       pages.push({ kind: 'text', label: 'Our promise to you', text: a.promise.trim(), motif: 'heart' });
@@ -406,10 +551,11 @@
 
     els.preview.innerHTML = '';
     if (page.kind === 'title') {
-      if (page.photo) {
+      const photoSrc = page.photo || (page.useAvatar ? avatarSceneFor('face', 300) : null);
+      if (photoSrc) {
         const img = document.createElement('img');
         img.className = 'preview-photo';
-        img.src = page.photo;
+        img.src = photoSrc;
         els.preview.appendChild(img);
       }
       const t = document.createElement('div');
@@ -421,6 +567,22 @@
       s.style.fontSize = '1.05rem';
       s.textContent = page.subtitle;
       els.preview.appendChild(t);
+      els.preview.appendChild(s);
+    } else if (page.kind === 'baby-portrait' || page.kind === 'family-portrait') {
+      if (page.label) {
+        const l = document.createElement('div');
+        l.className = 'page-label-inline';
+        l.textContent = page.label;
+        els.preview.appendChild(l);
+      }
+      const img = document.createElement('img');
+      img.className = 'preview-scene';
+      img.src = avatarSceneFor(page.kind === 'baby-portrait' ? 'baby' : 'family', 500);
+      els.preview.appendChild(img);
+      const s = document.createElement('div');
+      s.className = 'page-text';
+      s.style.fontSize = '1rem';
+      s.textContent = page.text;
       els.preview.appendChild(s);
     } else {
       if (page.label) {
@@ -489,8 +651,8 @@
       if (i > 0) doc.addPage();
 
       drawPageFrame(doc, pageWidth, pageHeight, theme);
-      const skipTitleMotif = page.kind === 'title' && page.photo;
-      if (!skipTitleMotif) {
+      const titleHasImage = page.kind === 'title' && (page.photo || page.useAvatar);
+      if (!titleHasImage) {
         drawMotif(doc, page.motif || 'heart', pageWidth / 2, page.kind === 'title' ? pageHeight * 0.24 : iconY, 22, theme);
       }
 
@@ -498,23 +660,28 @@
 
       if (page.kind === 'title') {
         let titleTop;
-        if (page.photo) {
+        if (titleHasImage) {
           const photoSize = 150;
           const photoX = pageWidth / 2 - photoSize / 2;
           const photoY = 68;
+          const cx = photoX + photoSize / 2;
+          const cy = photoY + photoSize / 2;
+          const rad = photoSize / 2;
+          const imgSrc = page.photo || avatarSceneFor('face', 300);
+          const imgFormat = page.photo ? 'JPEG' : 'PNG';
           try {
             doc.saveGraphicsState();
-            doc.roundedRect(photoX, photoY, photoSize, photoSize, 8, 8, null);
+            doc.circle(cx, cy, rad, null);
             doc.clip();
             doc.discardPath();
-            doc.addImage(page.photo, 'JPEG', photoX, photoY, photoSize, photoSize);
+            doc.addImage(imgSrc, imgFormat, photoX, photoY, photoSize, photoSize);
             doc.restoreGraphicsState();
           } catch (e) {
             // Corrupt/unsupported image data — skip the photo, keep the rest of the page intact.
           }
           doc.setDrawColor(theme.WARM[0], theme.WARM[1], theme.WARM[2]);
           doc.setLineWidth(2);
-          doc.roundedRect(photoX, photoY, photoSize, photoSize, 8, 8, 'S');
+          doc.circle(cx, cy, rad, 'S');
           titleTop = photoY + photoSize + 34;
         } else {
           titleTop = pageHeight * 0.24 + 40;
@@ -536,6 +703,37 @@
         });
         const subtitleBaseline = titleBottom + 24 + subtitle.lineHeight;
         doc.text(subtitle.lines, pageWidth / 2, subtitleBaseline, { align: 'center', lineHeightFactor: 1.3 });
+      } else if (page.kind === 'baby-portrait' || page.kind === 'family-portrait') {
+        let labelBottom = iconY + 40;
+        if (page.label) {
+          doc.setFont('times', 'bolditalic');
+          doc.setTextColor(theme.WARM_DARK[0], theme.WARM_DARK[1], theme.WARM_DARK[2]);
+          const label = fitTextBlock(doc, page.label, maxWidth, 60, { startSize: 13, minSize: 9 });
+          const labelBaseline = iconY + 44;
+          doc.text(label.lines, pageWidth / 2, labelBaseline, { align: 'center', lineHeightFactor: 1.2 });
+          doc.setTextColor(51, 41, 31);
+          labelBottom = labelBaseline + (label.lines.length - 1) * label.lineHeight * 1.2 + 16;
+        }
+        const imgSize = 250;
+        const imgX = pageWidth / 2 - imgSize / 2;
+        const imgY = labelBottom + 14;
+        try {
+          const sceneUrl = avatarSceneFor(page.kind === 'baby-portrait' ? 'baby' : 'family', 500);
+          doc.addImage(sceneUrl, 'PNG', imgX, imgY, imgSize, imgSize);
+        } catch (e) {
+          // Canvas rendering unsupported — skip the illustration, keep the caption.
+        }
+        doc.setFont('times', 'normal');
+        doc.setTextColor(51, 41, 31);
+        const captionTop = imgY + imgSize + 22;
+        const body = fitTextBlock(doc, page.text, maxWidth, bottomLimit - captionTop, {
+          startSize: 15,
+          minSize: 10,
+        });
+        doc.text(body.lines, pageWidth / 2, captionTop + body.lineHeight, {
+          align: 'center',
+          lineHeightFactor: 1.35,
+        });
       } else {
         let labelBottom = iconY + 40;
         if (page.label) {
@@ -561,7 +759,9 @@
       }
     });
 
-    const name = (state.answers.childName || 'origin-story').trim().replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    const name = (state.answers.childName || 'origin-story').trim()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // strip accents (e.g. "Siobhán" -> "Siobhan") instead of turning them into stray hyphens
+      .replace(/[^a-z0-9]+/gi, '-').toLowerCase();
     doc.save(name + '-origin-story.pdf');
   }
 
