@@ -17,13 +17,13 @@ const STORY_TYPES = [
     id: 'adoption',
     label: 'Adoption',
     defaultTitle: 'How Our Family Grew',
-    ideaLabel: 'Adoption',
+    ideaLabel: 'A Family Made by Adoption',
   },
   {
     id: 'surrogacy',
     label: 'Surrogacy',
     defaultTitle: 'How Our Family Grew',
-    ideaLabel: 'Surrogacy',
+    ideaLabel: 'A Little Help From a Surrogate',
   },
   {
     id: 'ivf',
@@ -49,6 +49,18 @@ const PARENT_LABEL_OPTIONS = [
   'Daddy',
   'Mama and Papa',
   'Other',
+];
+
+// Adoption happens by more than one path, and forcing every family into a
+// "birth mom chose you" narrative misrepresents the ones that didn't happen
+// that way (foster care, international, kinship) — see
+// docs/adoption-language-review.md. The origin sentence in js/app.js
+// branches on this field instead of assuming one story fits everyone.
+const ADOPTION_PATH_OPTIONS = [
+  'A birth parent chose us',
+  'Foster care',
+  'International adoption',
+  'Kinship / relative adoption',
 ];
 
 // Small, curated fields every book needs, regardless of story type.
@@ -103,7 +115,7 @@ const FAMILY_FIELDS = [
   {
     id: 'numSiblings',
     label: 'How many siblings were already part of the family?',
-    hint: 'The brothers/sisters already waiting to meet this child.',
+    hint: 'The brothers and sisters already waiting to meet this child.',
     type: 'select',
     options: ['0', '1', '2', '3', '4'],
     default: '0',
@@ -143,11 +155,20 @@ function siblingField(index) {
 const ORIGIN_FIELDS = {
   adoption: [
     {
+      id: 'adoptionPath',
+      label: 'How did your child join your family?',
+      hint: 'Every path is a real one — this shapes how we tell the story.',
+      type: 'select',
+      options: ADOPTION_PATH_OPTIONS,
+      default: ADOPTION_PATH_OPTIONS[0],
+    },
+    {
       id: 'birthParentTerm',
       label: 'What do you call the birth family?',
       type: 'select',
       options: ['birth mom', 'birth parents', 'birth family'],
       default: 'birth mom',
+      showIf: (a) => !a.adoptionPath || a.adoptionPath === ADOPTION_PATH_OPTIONS[0],
     },
     {
       id: 'travelPlace',
@@ -202,7 +223,7 @@ const ORIGIN_FIELDS = {
     },
     {
       id: 'joyfulDetail',
-      label: 'One joyful detail about your surrogate',
+      label: 'One joyful detail about the person who carried your child',
       type: 'text',
       placeholder: 'e.g. She sang to you every night before bed.',
       required: false,
@@ -219,11 +240,23 @@ const ORIGIN_FIELDS = {
       required: true,
       maxLength: 120,
     },
+    // Donor-conception research is consistent that this should be named
+    // plainly and early, not left out — see docs/family-language-review.md.
+    // A dedicated select (rather than burying it in the optional field
+    // below) makes "no donor" and "yes, honestly say so" equally easy.
+    {
+      id: 'donorInvolved',
+      label: 'Did a donor help your family — an egg, sperm, or embryo gift?',
+      hint: 'Experts encourage naming this plainly and early rather than leaving it out. Your answer shapes the story on the next page.',
+      type: 'select',
+      options: ['No — just science and us', 'Yes — an egg or sperm donor', 'Yes — a donor embryo'],
+      default: 'No — just science and us',
+    },
     {
       id: 'joyfulDetail',
-      label: 'Anything else to add (a donor, a milestone)?',
+      label: 'One joyful detail about your journey to your child (a milestone, a keepsake)',
       type: 'text',
-      placeholder: '',
+      placeholder: 'e.g. We kept the positive test in a memory box.',
       required: false,
       maxLength: 120,
     },
@@ -242,7 +275,7 @@ const ORIGIN_FIELDS = {
       id: 'joyfulDetail',
       label: 'One joyful detail about the family you joined',
       type: 'text',
-      placeholder: '',
+      placeholder: 'e.g. Your new brother taught you to ride a bike.',
       required: false,
       maxLength: 120,
     },

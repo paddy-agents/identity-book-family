@@ -73,9 +73,15 @@
       ctx.fill();
     }
     if (style === 'long') {
+      // Scaled to keep the farthest point of these ellipses within ~0.95 of
+      // the 0.5*size circular clip callers apply (see drawFace's r comment) —
+      // the original 0.98/0.55/0.32/0.85 values reached ~1.25x that clip
+      // radius, silently cropping the bottom of long hair in the cover
+      // photo/avatar circle (never an issue in the unclipped baby/family
+      // scenes, which is why it went unnoticed).
       [-1, 1].forEach((side) => {
         ctx.beginPath();
-        ctx.ellipse(cx + side * r * 0.98, cy + r * 0.55, r * 0.32, r * 0.85, 0, 0, Math.PI * 2);
+        ctx.ellipse(cx + side * r * 0.75, cy + r * 0.42, r * 0.24, r * 0.65, 0, 0, Math.PI * 2);
         ctx.fill();
       });
     }
@@ -148,13 +154,19 @@
     ctx.stroke();
   }
 
-  function drawPersonSilhouette(ctx, cx, groundY, scale, hex) {
+  // All dimensions are proportional to `size` (the canvas's own pixel
+  // dimensions), not absolute pixels — the same scene is rendered at very
+  // different canvas sizes for the live preview vs. the print-resolution
+  // PDF (see avatarSceneFor in app.js), so absolute pixel constants here
+  // would silently shrink relative to the canvas at higher resolutions.
+  function drawPersonSilhouette(ctx, cx, groundY, scale, hex, size) {
     ctx.fillStyle = hex;
-    const headR = 22 * scale;
+    const unit = size / 500; // constants below were tuned against a 500px canvas
+    const headR = 22 * scale * unit;
     ctx.beginPath();
-    ctx.arc(cx, groundY - 92 * scale, headR, 0, Math.PI * 2);
+    ctx.arc(cx, groundY - 92 * scale * unit, headR, 0, Math.PI * 2);
     ctx.fill();
-    roundedRectPath(ctx, cx - 30 * scale, groundY - 72 * scale, 60 * scale, 74 * scale, 16 * scale);
+    roundedRectPath(ctx, cx - 30 * scale * unit, groundY - 72 * scale * unit, 60 * scale * unit, 74 * scale * unit, 16 * scale * unit);
     ctx.fill();
   }
 
@@ -192,11 +204,6 @@
       ctx.fillStyle = warmHex;
       roundedRectPath(ctx, cx - r * 1.5, cy + r * 0.35, r * 3, size * 0.42, r * 0.9);
       ctx.fill();
-      ctx.globalAlpha = 0.35;
-      ctx.fillStyle = '#ffffff';
-      roundedRectPath(ctx, cx - r * 1.5, cy + r * 0.35, r * 3, size * 0.14, r * 0.7);
-      ctx.fill();
-      ctx.globalAlpha = 1;
       drawFace(ctx, cx, cy, r, avatar);
       return canvas.toDataURL('image/png');
     }
@@ -204,15 +211,18 @@
     if (kind === 'family') {
       const groundY = size * 0.86;
       const cx = size / 2;
-      const parentCount = Math.min(opts.parentCount || 0, 2) || 2;
+      // Clamp to [1, 2]: a genuine 0 (e.g. an unparseable custom parents
+      // label) should still draw one silhouette, not silently jump to 2 —
+      // `|| 2` here previously treated a real 0 the same as "not provided".
+      const parentCount = Math.max(1, Math.min(opts.parentCount || 0, 2));
       const siblingCount = opts.siblingCount ? 1 : 0;
       const positions = parentCount === 2 ? [-1, 1] : [-1];
       // 0.28 (not 0.24) leaves room for the widest hair styles (long/pigtails,
       // ~1.35x the face radius) so hair never overlaps the parent silhouettes.
-      positions.forEach((side) => drawPersonSilhouette(ctx, cx + side * size * 0.28, groundY, 1, warmDarkHex));
-      if (siblingCount) drawPersonSilhouette(ctx, cx + size * (parentCount === 2 ? 0.42 : 0.3), groundY, 0.62, warmHex);
+      positions.forEach((side) => drawPersonSilhouette(ctx, cx + side * size * 0.28, groundY, 1, warmDarkHex, size));
+      if (siblingCount) drawPersonSilhouette(ctx, cx + size * (parentCount === 2 ? 0.42 : 0.3), groundY, 0.62, warmHex, size);
       ctx.strokeStyle = warmHex;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = Math.max(1.5, size * 0.004);
       ctx.beginPath();
       ctx.moveTo(size * 0.08, groundY);
       ctx.lineTo(size * 0.92, groundY);

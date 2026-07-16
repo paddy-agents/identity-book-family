@@ -10,7 +10,6 @@
 
   const els = {};
 
-  document.addEventListener('DOMContentLoaded', init);
 
   function init() {
     els.storyTypes = document.getElementById('story-types');
@@ -22,8 +21,11 @@
     els.nextBtn = document.getElementById('next-page');
     els.downloadBtn = document.getElementById('download-btn');
     els.downloadHint = document.getElementById('download-hint');
+    els.charsetWarning = document.getElementById('charset-warning');
+    els.downloadError = document.getElementById('download-error');
     els.startOverBtn = document.getElementById('start-over-btn');
     els.savedNote = document.getElementById('saved-note');
+    els.saveError = document.getElementById('save-error');
 
     renderStoryTypeCards();
     els.prevBtn.addEventListener('click', () => movePreview(-1));
@@ -50,7 +52,9 @@
     state.previewIndex = saved.previewIndex || 0;
 
     [...els.storyTypes.children].forEach((card) => {
-      card.classList.toggle('selected', card.dataset.id === state.storyType);
+      const isSelected = card.dataset.id === state.storyType;
+      card.classList.toggle('selected', isSelected);
+      card.setAttribute('aria-pressed', String(isSelected));
     });
     els.formSection.hidden = false;
     renderFields();
@@ -60,6 +64,7 @@
 
   function saveProgress() {
     if (!state.storyType) return;
+    let didSave = true;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         storyType: state.storyType,
@@ -68,9 +73,13 @@
         previewIndex: state.previewIndex,
       }));
     } catch (e) {
-      // localStorage unavailable (private browsing, quota, etc) — fail silently, nothing else changes.
+      // localStorage unavailable (private browsing, quota, etc). Surface this —
+      // silently swallowing it while still saying "Saved" would falsely tell a
+      // parent their work is safe when it isn't.
+      didSave = false;
     }
-    if (els.savedNote) els.savedNote.hidden = false;
+    if (els.savedNote) els.savedNote.hidden = !didSave;
+    if (els.saveError) els.saveError.hidden = didSave;
   }
 
   function startOver() {
@@ -89,7 +98,13 @@
       card.setAttribute('aria-pressed', 'false');
     });
     els.formSection.hidden = true;
+    // #start-over-btn (which may hold focus right now) lives inside savedNote —
+    // hiding it without moving focus first would drop focus to <body>.
+    const heading = document.getElementById('story-type-heading');
+    if (heading) heading.focus();
     if (els.savedNote) els.savedNote.hidden = true;
+    if (els.saveError) els.saveError.hidden = true;
+    if (els.downloadError) els.downloadError.hidden = true;
     delete document.body.dataset.theme;
     renderPreview();
   }
@@ -109,6 +124,17 @@
   }
 
   function selectStoryType(id) {
+    // joyfulDetail is the one field id every story type reuses for a
+    // DIFFERENT question ("about your birth family" vs "about your
+    // surrogate" vs "a milestone" vs "about the family you joined") — unlike
+    // travelPlace/travelDuration, which mean the same thing in every type
+    // that has them. Carrying its text across a type switch produces content
+    // that actively contradicts the rest of the book (e.g. an IVF book
+    // mentioning a "birth mom" it never otherwise references), so it must be
+    // cleared, not just relabeled, when the story type actually changes.
+    if (state.storyType && state.storyType !== id) {
+      delete state.answers.joyfulDetail;
+    }
     state.storyType = id;
     state.previewIndex = 0;
     [...els.storyTypes.children].forEach((card) => {
@@ -123,6 +149,7 @@
     }
 
     els.formSection.hidden = false;
+    if (els.downloadError) els.downloadError.hidden = true;
     renderFields();
     renderPreview();
     saveProgress();
@@ -172,7 +199,12 @@
 
       const label = document.createElement('label');
       label.textContent = f.label + (f.required ? '' : ' (optional)');
-      label.setAttribute('for', 'field-' + f.id);
+      // The avatar builder is a group of buttons/swatches, not one control
+      // with a matching 'field-<id>' element — a `for` here would point at
+      // nothing and orphan the label for screen readers and label clicks.
+      if (f.type !== 'avatar') {
+        label.setAttribute('for', 'field-' + f.id);
+      }
       wrap.appendChild(label);
 
       if (f.hint) {
@@ -214,15 +246,26 @@
       input.value = value;
       state.answers[f.id] = value;
 
+      // A single 'input' listener is enough — <select> fires both 'input' and
+      // 'change' natively in all evergreen browsers, so listening to both
+      // used to run the whole onFieldChange pipeline (state write, a
+      // conditional renderFields() DOM rebuild, renderPreview(),
+      // saveProgress()) twice per selection.
       input.addEventListener('input', onFieldChange(f, input));
-      if (f.type === 'select') input.addEventListener('change', onFieldChange(f, input));
 
       wrap.appendChild(input);
       els.fields.appendChild(wrap);
     });
 
     if (focusedId) {
-      const toFocus = document.getElementById(focusedId);
+      let toFocus = document.getElementById(focusedId);
+      // A field can rebuild into a state where the same id is now hidden —
+      // e.g. "Remove photo" only exists while a photo is set, so removing
+      // one makes its own id disappear from view. Fall back to the file
+      // input it sits next to, the next logical control for that field.
+      if (toFocus && toFocus.hidden && focusedId.endsWith('-remove')) {
+        toFocus = document.getElementById(focusedId.slice(0, -'-remove'.length));
+      }
       if (toFocus) toFocus.focus();
     }
   }
@@ -238,9 +281,16 @@
 
     const thumb = document.createElement('img');
     thumb.className = 'photo-thumb';
+    thumb.alt = "Your uploaded photo of your child";
     thumb.hidden = !current;
     if (current) thumb.src = current;
     uploadWrap.appendChild(thumb);
+
+    const errorMsg = document.createElement('p');
+    errorMsg.className = 'photo-upload-error';
+    errorMsg.setAttribute('role', 'alert');
+    errorMsg.hidden = true;
+    errorMsg.textContent = "That file couldn't be used as a photo — please try a JPG or PNG image.";
 
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
@@ -249,18 +299,28 @@
     fileInput.addEventListener('change', () => {
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
-      cropPhotoToSquare(file, (dataUrl) => {
-        state.answers[f.id] = dataUrl;
-        renderFields();
-        renderPreview();
-        saveProgress();
-      });
+      errorMsg.hidden = true;
+      cropPhotoToSquare(
+        file,
+        (dataUrl) => {
+          state.answers[f.id] = dataUrl;
+          renderFields();
+          renderPreview();
+          saveProgress();
+        },
+        () => {
+          fileInput.value = '';
+          errorMsg.hidden = false;
+        }
+      );
     });
     uploadWrap.appendChild(fileInput);
+    uploadWrap.appendChild(errorMsg);
 
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'link-btn';
+    removeBtn.id = 'field-' + f.id + '-remove';
     removeBtn.textContent = 'Remove photo';
     removeBtn.hidden = !current;
     removeBtn.addEventListener('click', () => {
@@ -276,13 +336,21 @@
 
   // Reads an image file, center-crops it to a square, and downsizes it so the
   // resulting data URL is small enough to live comfortably in localStorage
-  // alongside the rest of the answers (a few hundred KB at most).
-  function cropPhotoToSquare(file, onDone) {
+  // alongside the rest of the answers (a few hundred KB at most). 625px is
+  // sized for the PDF's 150pt cover circle at true 300 DPI print quality
+  // (same reasoning as the avatar/portrait scenes — see avatarSceneFor).
+  // `accept="image/*"` on the file input doesn't stop someone from picking
+  // "All Files" and choosing something that isn't actually an image — without
+  // these error handlers, the reader/Image simply never fire onload and the
+  // button looks like it silently did nothing.
+  function cropPhotoToSquare(file, onDone, onError) {
     const reader = new FileReader();
+    reader.onerror = () => onError();
     reader.onload = (e) => {
       const img = new Image();
+      img.onerror = () => onError();
       img.onload = () => {
-        const size = 500;
+        const size = 625;
         const canvas = document.createElement('canvas');
         canvas.width = size;
         canvas.height = size;
@@ -392,13 +460,20 @@
     return () => {
       if (f.id === 'bookTitle') state.titleTouched = true;
       state.answers[f.id] = input.value;
-      // numSiblings/parentsLabel changes may add/remove dependent fields.
-      if (f.id === 'numSiblings' || f.id === 'parentsLabel') {
+      // numSiblings/parentsLabel/adoptionPath changes may add/remove dependent fields.
+      if (f.id === 'numSiblings' || f.id === 'parentsLabel' || f.id === 'adoptionPath') {
         renderFields();
       }
       renderPreview();
       saveProgress();
     };
+  }
+
+  function withIndefiniteArticle(word) {
+    // Strip accents before testing so names like "Émile"/"Óscar" get "an",
+    // not just plain-ASCII vowel starters.
+    const plain = word.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    return (/^[aeiou]/i.test(plain) ? 'an ' : 'a ') + word;
   }
 
   function joinWithAnd(items) {
@@ -411,9 +486,10 @@
 
   function getParentsList(a) {
     const raw = a.parentsLabel === 'Other' ? (a.parentsLabelCustom || '') : (a.parentsLabel || '');
-    // Custom entries commonly use "and", "&", or a comma to join caregivers
-    // (e.g. "Grandma and Grandpa", "Grandma & Grandpa", "Grandma, Grandpa").
-    return raw.split(/\s*,\s*|\s+&\s+|\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
+    // Custom entries commonly use "and", "&", a comma, or a semicolon to join
+    // caregivers (e.g. "Grandma and Grandpa", "Grandma & Grandpa",
+    // "Grandma, Grandpa", "Mama Rae; Mama Jo").
+    return raw.split(/\s*,\s*|\s*&\s*|\s*;\s*|\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
   }
 
   function getSiblingNames(a) {
@@ -438,8 +514,8 @@
     const parentsPhrase = joinWithAnd(parents) || 'a family';
 
     const members = [
-      ...parents.map((p) => 'a ' + p),
-      ...siblings.map((s) => 'a ' + s),
+      ...parents.map(withIndefiniteArticle),
+      ...siblings.map(withIndefiniteArticle),
       ...(pet ? ['a pet named ' + pet] : []),
     ];
 
@@ -477,7 +553,12 @@
       pages.push({ kind: 'text', label: 'A joyful detail', text: a.joyfulDetail.trim(), motif: 'sparkle' });
     }
 
-    if ((a.travelPlace && a.travelPlace.trim()) || (a.travelDuration && a.travelDuration.trim())) {
+    // travelPlace/travelDuration only exist in the adoption & surrogacy forms.
+    // Switching story types doesn't clear state.answers (so shared fields like
+    // childName carry over), so a stale value from a previously-selected type
+    // must not leak into a type whose form can't even show/clear it.
+    const hasTravelField = getFieldsFor(state.storyType).some((f) => f.id === 'travelPlace');
+    if (hasTravelField && ((a.travelPlace && a.travelPlace.trim()) || (a.travelDuration && a.travelDuration.trim()))) {
       let text = parentsPhrase + ' traveled';
       if (a.travelPlace && a.travelPlace.trim()) text += ' to ' + a.travelPlace.trim();
       if (a.travelDuration && a.travelDuration.trim()) text += ' — ' + a.travelDuration.trim() + ' of waiting and love';
@@ -487,7 +568,7 @@
 
     pages.push({
       kind: 'text',
-      text: parentsPhrase + ' could not believe their great blessing the very first time they held ' + name + '.',
+      text: parentsPhrase + ' could hardly believe how blessed they were the very first time they held ' + name + '.',
       motif: 'heart',
     });
 
@@ -532,15 +613,36 @@
     }
     if (storyTypeId === 'ivf') {
       const detail = a.helperDetail && a.helperDetail.trim() ? a.helperDetail.trim() : 'doctors helped us';
+      // Donor conception is a true, distinct part of some families' stories —
+      // named plainly here rather than folded silently into "doctors helped
+      // us" (see docs/family-language-review.md).
+      if (a.donorInvolved === 'Yes — an egg or sperm donor') {
+        return parentsPhrase + ' wanted ' + name + ' so much — ' + detail + ', with a generous donor’s help, and then, there ' + name + ' was!';
+      }
+      if (a.donorInvolved === 'Yes — a donor embryo') {
+        return parentsPhrase + ' wanted ' + name + ' so much — ' + detail + ', and a donor’s generous gift of an embryo, and then, there ' + name + ' was!';
+      }
       return parentsPhrase + ' wanted ' + name + ' so much — ' + detail + ', and then, there ' + name + ' was!';
     }
     if (storyTypeId === 'blended') {
-      const how = a.howCame && a.howCame.trim() ? a.howCame.trim() : 'we met, fell in love, and became one family';
+      const how = a.howCame && a.howCame.trim() ? a.howCame.trim() : 'met, fell in love, and became one family';
       return parentsPhrase + ' ' + how + ', and that is how our family grew.';
     }
-    // adoption (default)
+    // adoption — the story differs by real path (see docs/adoption-language-review.md):
+    // a single "birth mom chose you" narrative doesn't fit foster, international,
+    // or kinship adoptions, so it only applies to that specific path.
+    const path = a.adoptionPath || 'A birth parent chose us';
+    if (path === 'Foster care') {
+      return parentsPhrase + ' opened their hearts and their home, and that is how ' + name + ' became part of the family, forever.';
+    }
+    if (path === 'International adoption') {
+      return parentsPhrase + ' traveled all the way to bring ' + name + ' home, and that is how our family grew, forever.';
+    }
+    if (path === 'Kinship / relative adoption') {
+      return name + ' was already loved by ' + parentsPhrase + ' — and that is how ' + name + "'s family grew even bigger, forever.";
+    }
     const term = a.birthParentTerm || 'birth mom';
-    return 'A ' + term + ' loved ' + name + ' so much that they chose ' + parentsPhrase + ' to be ' + name + "'s family, forever.";
+    return 'The ' + term + ' loved ' + name + ' so much that they chose ' + parentsPhrase + ' to be ' + name + "'s family, forever.";
   }
 
   function renderPreview() {
@@ -555,6 +657,7 @@
       if (photoSrc) {
         const img = document.createElement('img');
         img.className = 'preview-photo';
+        img.alt = '';
         img.src = photoSrc;
         els.preview.appendChild(img);
       }
@@ -577,6 +680,7 @@
       }
       const img = document.createElement('img');
       img.className = 'preview-scene';
+      img.alt = '';
       img.src = avatarSceneFor(page.kind === 'baby-portrait' ? 'baby' : 'family', 500);
       els.preview.appendChild(img);
       const s = document.createElement('div');
@@ -606,10 +710,64 @@
     els.downloadHint.textContent = els.downloadBtn.disabled
       ? 'Fill in the required prompts above to unlock your download.'
       : 'Your book is ready.';
+
+    const badChars = collectUnsupportedGlyphs(pages);
+    if (badChars.length) {
+      els.charsetWarning.hidden = false;
+      els.charsetWarning.textContent = 'Heads up: the downloadable PDF can only display Latin/European ' +
+        'letters right now, so ' + badChars.map((c) => '"' + c + '"').join(', ') +
+        ' will come out as garbled symbols in your download, even though it looks right here in the preview. ' +
+        "We're sorry about that — wider language support is on our list.";
+    } else {
+      els.charsetWarning.hidden = true;
+      els.charsetWarning.textContent = '';
+    }
+  }
+
+  // The PDF's built-in font (jsPDF standard Helvetica/Times, WinAnsi-encoded)
+  // only covers Latin + Latin-1 Supplement, unlike the browser's font in the
+  // live preview above — so anything outside that (CJK, Arabic, Hebrew,
+  // Cyrillic, emoji, ...) silently renders as mojibake in the PDF only.
+  // This scans typed answers so we can warn honestly instead of shipping a
+  // keepsake with a garbled child's name.
+  // Windows-1252 (what jsPDF's standard fonts actually encode to) maps a
+  // couple dozen extra characters above 0xFF into its 0x80-0x9F block — things
+  // like em/en dashes and curly quotes that this product's own prompt copy
+  // (see js/prompts.js's "promise" default) already relies on. Only codepoints
+  // outside Latin-1 AND outside this extra set are genuinely unsupported.
+  const WINANSI_EXTRA = new Set([
+    0x20ac, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030,
+    0x0160, 0x2039, 0x0152, 0x017d, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022,
+    0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x017e, 0x0178,
+  ]);
+
+  function collectUnsupportedGlyphs(pages) {
+    const found = new Set();
+    const texts = [];
+    pages.forEach((page) => {
+      texts.push(page.title, page.subtitle, page.label, page.text);
+    });
+    texts.forEach((value) => {
+      if (typeof value !== 'string') return;
+      for (const ch of value) {
+        const code = ch.codePointAt(0);
+        if (code > 0xff && !WINANSI_EXTRA.has(code)) found.add(ch);
+      }
+    });
+    return Array.from(found);
   }
 
   function allRequiredFilled() {
-    return getVisibleFields().every((f) => !f.required || (state.answers[f.id] && state.answers[f.id].trim()));
+    return getVisibleFields().every((f) => {
+      if (!f.required) return true;
+      const value = state.answers[f.id];
+      if (!value || !value.trim()) return false;
+      // A custom parents label like "," or "&" alone is non-blank text but
+      // parses to zero actual names — that would leave the family-portrait
+      // scene silently drawing generic silhouettes with nothing to back them.
+      if (f.id === 'parentsLabelCustom') return getParentsList(state.answers).length > 0;
+      return true;
+    });
   }
 
   function movePreview(delta) {
@@ -621,14 +779,19 @@
   // Shrinks font size until the wrapped text fits within maxHeight (or hits
   // minSize) — a safety net so an unusually long combination of answers
   // (e.g. several sibling names plus a pet) can't overflow off the page.
+  // lineHeightFactor MUST match the lineHeightFactor the caller passes to
+  // doc.text() for this same block — otherwise the fit check verifies a
+  // different (and potentially shorter) block height than what jsPDF
+  // actually renders, which defeats the point of the safety net.
   function fitTextBlock(doc, text, maxWidth, maxHeight, opts) {
     let fontSize = opts.startSize;
     const minSize = opts.minSize;
+    const lineHeightFactor = opts.lineHeightFactor;
     let lines, lineHeight, blockHeight;
     while (true) {
       doc.setFontSize(fontSize);
       lines = doc.splitTextToSize(text, maxWidth);
-      lineHeight = fontSize * 1.37;
+      lineHeight = fontSize * lineHeightFactor;
       blockHeight = lines.length * lineHeight;
       if (blockHeight <= maxHeight || fontSize <= minSize) break;
       fontSize -= 1;
@@ -636,11 +799,66 @@
     return { lines, fontSize, lineHeight, blockHeight };
   }
 
-  function downloadBook() {
+  // jsPDF is loaded from a CDN (book.html) — a blocked/offline network, an
+  // aggressive ad/tracker blocker, or any other generation error must not
+  // fail silently, since the button otherwise looks like it did nothing.
+  function downloadBook(evt) {
+    // A double-click (easy to do, especially on a trackpad) fired this handler
+    // twice, producing two separate PDF downloads. UIEvent.detail on a native
+    // click event is the browser's own multi-click counter (2 for the second
+    // click of a double-click, 3 for a triple, etc.) — ignore anything past
+    // the first click of a cluster without affecting genuinely separate
+    // single clicks (e.g. a retry after fixing a download error).
+    if (evt && evt.detail > 1) return;
+    els.downloadError.hidden = true;
+    // buildAndSaveDoc() draws every page synchronously and can block the main
+    // thread for a noticeable stretch on a heavy book (several avatar scenes
+    // at print resolution, a real uploaded photo, many pages) — measured
+    // ~230ms even on a fast dev machine, likely much longer on an average
+    // parent's device. With no feedback the button just looked frozen,
+    // inviting exactly the double-click this same function already guards
+    // against. Disable the button and swap its label first, then wait two
+    // animation frames (the standard way to force a paint of that change)
+    // before doing the blocking work, so the "Generating…" state is actually
+    // visible for the duration of the freeze.
+    els.downloadBtn.disabled = true;
+    const originalLabel = els.downloadBtn.textContent;
+    els.downloadBtn.textContent = 'Generating your book…';
+    els.downloadHint.textContent = 'Generating your book — this can take a few seconds for a longer story.';
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        try {
+          buildAndSaveDoc();
+        } catch (e) {
+          console.error('PDF generation failed:', e);
+          els.downloadError.hidden = false;
+          els.downloadError.textContent =
+            "We couldn't create your PDF — please check your internet connection and try again.";
+        } finally {
+          els.downloadBtn.textContent = originalLabel;
+          els.downloadBtn.disabled = !state.storyType || !allRequiredFilled();
+          els.downloadHint.textContent = els.downloadBtn.disabled
+            ? 'Fill in the required prompts above to unlock your download.'
+            : 'Your book is ready.';
+        }
+      });
+    });
+  }
+
+  function buildAndSaveDoc() {
     const pages = buildPages();
     const theme = themeFor(state.storyType);
+    const st = STORY_TYPES.find((s) => s.id === state.storyType) || STORY_TYPES[0];
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+    // Without this, PDF viewers and screen readers fall back to the raw
+    // filename instead of the book's actual title.
+    doc.setProperties({
+      title: pages[0].title,
+      subject: pages[0].subtitle,
+      creator: 'Origin Stories: Identity Books',
+      keywords: st.label,
+    });
     const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
     const margin = 72;
@@ -667,14 +885,16 @@
           const cx = photoX + photoSize / 2;
           const cy = photoY + photoSize / 2;
           const rad = photoSize / 2;
-          const imgSrc = page.photo || avatarSceneFor('face', 300);
+          // 625px for a 150pt circle = 300 DPI (print quality); the drawing
+          // routine is resolution-independent so this costs nothing visually.
+          const imgSrc = page.photo || avatarSceneFor('face', 625);
           const imgFormat = page.photo ? 'JPEG' : 'PNG';
           try {
             doc.saveGraphicsState();
             doc.circle(cx, cy, rad, null);
             doc.clip();
             doc.discardPath();
-            doc.addImage(imgSrc, imgFormat, photoX, photoY, photoSize, photoSize);
+            doc.addImage(imgSrc, imgFormat, photoX, photoY, photoSize, photoSize, undefined, 'MEDIUM');
             doc.restoreGraphicsState();
           } catch (e) {
             // Corrupt/unsupported image data — skip the photo, keep the rest of the page intact.
@@ -690,6 +910,7 @@
         const title = fitTextBlock(doc, page.title, maxWidth, bottomLimit - titleTop - 60, {
           startSize: 30,
           minSize: 16,
+          lineHeightFactor: 1.3,
         });
         doc.setTextColor(51, 41, 31);
         const titleBaseline = titleTop + title.lineHeight;
@@ -700,6 +921,7 @@
         const subtitle = fitTextBlock(doc, page.subtitle, maxWidth, bottomLimit - titleBottom - 24, {
           startSize: 16,
           minSize: 11,
+          lineHeightFactor: 1.3,
         });
         const subtitleBaseline = titleBottom + 24 + subtitle.lineHeight;
         doc.text(subtitle.lines, pageWidth / 2, subtitleBaseline, { align: 'center', lineHeightFactor: 1.3 });
@@ -708,18 +930,23 @@
         if (page.label) {
           doc.setFont('times', 'bolditalic');
           doc.setTextColor(theme.WARM_DARK[0], theme.WARM_DARK[1], theme.WARM_DARK[2]);
-          const label = fitTextBlock(doc, page.label, maxWidth, 60, { startSize: 13, minSize: 9 });
+          const label = fitTextBlock(doc, page.label, maxWidth, 60, {
+            startSize: 13,
+            minSize: 9,
+            lineHeightFactor: 1.2,
+          });
           const labelBaseline = iconY + 44;
           doc.text(label.lines, pageWidth / 2, labelBaseline, { align: 'center', lineHeightFactor: 1.2 });
           doc.setTextColor(51, 41, 31);
-          labelBottom = labelBaseline + (label.lines.length - 1) * label.lineHeight * 1.2 + 16;
+          labelBottom = labelBaseline + (label.lines.length - 1) * label.lineHeight + 16;
         }
         const imgSize = 250;
         const imgX = pageWidth / 2 - imgSize / 2;
         const imgY = labelBottom + 14;
         try {
-          const sceneUrl = avatarSceneFor(page.kind === 'baby-portrait' ? 'baby' : 'family', 500);
-          doc.addImage(sceneUrl, 'PNG', imgX, imgY, imgSize, imgSize);
+          // 1042px for a 250pt image = 300 DPI (print quality), same reasoning as the face scene above.
+          const sceneUrl = avatarSceneFor(page.kind === 'baby-portrait' ? 'baby' : 'family', 1042);
+          doc.addImage(sceneUrl, 'PNG', imgX, imgY, imgSize, imgSize, undefined, 'MEDIUM');
         } catch (e) {
           // Canvas rendering unsupported — skip the illustration, keep the caption.
         }
@@ -729,6 +956,7 @@
         const body = fitTextBlock(doc, page.text, maxWidth, bottomLimit - captionTop, {
           startSize: 15,
           minSize: 10,
+          lineHeightFactor: 1.35,
         });
         doc.text(body.lines, pageWidth / 2, captionTop + body.lineHeight, {
           align: 'center',
@@ -739,16 +967,21 @@
         if (page.label) {
           doc.setFont('times', 'bolditalic');
           doc.setTextColor(theme.WARM_DARK[0], theme.WARM_DARK[1], theme.WARM_DARK[2]);
-          const label = fitTextBlock(doc, page.label, maxWidth, 60, { startSize: 13, minSize: 9 });
+          const label = fitTextBlock(doc, page.label, maxWidth, 60, {
+            startSize: 13,
+            minSize: 9,
+            lineHeightFactor: 1.2,
+          });
           const labelBaseline = iconY + 44;
           doc.text(label.lines, pageWidth / 2, labelBaseline, { align: 'center', lineHeightFactor: 1.2 });
           doc.setTextColor(51, 41, 31);
-          labelBottom = labelBaseline + (label.lines.length - 1) * label.lineHeight * 1.2 + 16;
+          labelBottom = labelBaseline + (label.lines.length - 1) * label.lineHeight + 16;
         }
         doc.setFont('times', 'normal');
         const body = fitTextBlock(doc, page.text, maxWidth, bottomLimit - labelBottom, {
           startSize: 19,
           minSize: 10,
+          lineHeightFactor: 1.4,
         });
         let startY = pageHeight / 2 - body.blockHeight / 2 + body.lineHeight;
         if (startY < labelBottom + body.lineHeight) startY = labelBottom + body.lineHeight;
@@ -759,24 +992,26 @@
       }
     });
 
-    const name = (state.answers.childName || 'origin-story').trim()
+    const name = (state.answers.childName || '').trim()
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // strip accents (e.g. "Siobhán" -> "Siobhan") instead of turning them into stray hyphens
-      .replace(/[^a-z0-9]+/gi, '-').toLowerCase();
-    doc.save(name + '-origin-story.pdf');
+      .replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase();
+    // A name written entirely in a non-Latin script (e.g. "小明") has nothing
+    // left after the above, which used to save as the broken "--origin-story.pdf".
+    doc.save((name ? name + '-' : '') + 'origin-story.pdf');
   }
 
   // --- decorative vector motifs (kept as simple shape primitives, no image assets) ---
 
   const INK = [51, 41, 31];
 
-  // Per-story-type accent palettes. Kept in sync with the WARM/WARM-DARK/SOFT/
-  // CREAM custom properties in css/style.css so the live preview and the
+  // Per-story-type accent palettes. Kept in sync with the WARM/WARM-DARK/SOFT
+  // custom properties in css/style.css so the live preview and the
   // downloaded PDF use matching colors. INK (body text) stays constant.
   const THEMES = {
-    adoption: { WARM: [201, 113, 58], WARM_DARK: [168, 90, 42], SOFT: [238, 225, 207], CREAM: [251, 246, 239] },
-    surrogacy: { WARM: [90, 140, 150], WARM_DARK: [58, 102, 112], SOFT: [204, 226, 228], CREAM: [242, 248, 247] },
-    ivf: { WARM: [142, 110, 168], WARM_DARK: [104, 74, 130], SOFT: [223, 210, 232], CREAM: [248, 244, 251] },
-    blended: { WARM: [124, 148, 96], WARM_DARK: [90, 112, 64], SOFT: [216, 226, 200], CREAM: [247, 249, 241] },
+    adoption: { WARM: [201, 113, 58], WARM_DARK: [168, 90, 42], SOFT: [238, 225, 207] },
+    surrogacy: { WARM: [90, 140, 150], WARM_DARK: [58, 102, 112], SOFT: [204, 226, 228] },
+    ivf: { WARM: [142, 110, 168], WARM_DARK: [104, 74, 130], SOFT: [223, 210, 232] },
+    blended: { WARM: [124, 148, 96], WARM_DARK: [90, 112, 64], SOFT: [216, 226, 200] },
   };
 
   function themeFor(storyTypeId) {
@@ -815,7 +1050,10 @@
   function moonStars(doc, cx, cy, r, theme) {
     doc.setFillColor(theme.WARM_DARK[0], theme.WARM_DARK[1], theme.WARM_DARK[2]);
     doc.circle(cx, cy, r * 0.6, 'F');
-    doc.setFillColor(theme.CREAM[0], theme.CREAM[1], theme.CREAM[2]);
+    // "Erases" a bite out of the moon to leave a crescent — the page itself
+    // is plain white (drawPageFrame fills no background), so this must match
+    // white exactly, not theme.CREAM, or the cut shows as a visible tinted disc.
+    doc.setFillColor(255, 255, 255);
     doc.circle(cx + r * 0.32, cy - r * 0.22, r * 0.5, 'F');
     sparkleDot(doc, cx - r * 1.1, cy - r * 0.5, 2.5, theme);
     sparkleDot(doc, cx + r * 1.25, cy + r * 0.3, 2, theme);
@@ -864,7 +1102,10 @@
       doc.setFillColor(c[0], c[1], c[2]);
       doc.ellipse(cx, cy, rr, rr * 0.72, 'F');
     });
-    doc.setFillColor(theme.CREAM[0], theme.CREAM[1], theme.CREAM[2]);
+    // Masks the bottom half of the arc so it reads as emerging from the
+    // page — must match the page's actual (plain white) background, not
+    // theme.CREAM, or the mask shows as a visible tinted box (see moonStars).
+    doc.setFillColor(255, 255, 255);
     doc.rect(cx - r - 4, cy, (r + 4) * 2, r * 0.72 + 4, 'F');
   }
 
@@ -890,4 +1131,12 @@
         return heart(doc, cx, cy, r, theme.WARM_DARK, 'F');
     }
   }
+
+  // This script tag sits at the end of <body>, after every element init()
+  // touches, so the DOM is already complete here — no need to wait for
+  // DOMContentLoaded (which would also mean waiting on the jsPDF <script>
+  // tag below this one, defeating the point of moving it last). Called at
+  // the bottom of the file, not the top, so every const/function above
+  // (THEMES, etc.) is already initialized before init() can reach them.
+  init();
 })();

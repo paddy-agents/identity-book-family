@@ -4,6 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Create your Origin Story — Origin Stories</title>
+  <meta name="description" content="Pick your family's story type, answer a few short prompts, and download a custom keepsake book." />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="Create your Origin Story — Origin Stories" />
+  <meta property="og:description" content="Pick your family's story type, answer a few short prompts, and download a custom keepsake book." />
+  <meta name="twitter:card" content="summary" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
@@ -13,19 +18,42 @@
   </header>
 
   <main class="wrap">
+    <noscript>
+      <div class="noscript-notice">
+        <p><strong>This page needs JavaScript to work.</strong></p>
+        <p>Origin Stories builds your book live in your browser as you type, so
+        it can't work with JavaScript turned off. Please enable JavaScript in
+        your browser settings and reload this page to continue.</p>
+      </div>
+      <style>
+        .story-type-heading, #story-types { display: none; }
+      </style>
+    </noscript>
+
+    <div class="print-only">
+      <h1 style="font-size:1.8rem;">This page isn't meant to be printed directly</h1>
+      <p>Origin Stories books are downloaded as a PDF, not printed from this page.</p>
+      <p>Go back to your browser and click "Download your book (PDF)", then print that file instead — it's laid out to look like a real book page, not a web form.</p>
+    </div>
+
     <h1 class="hero" style="text-align:center;font-size:1.8rem;">Tell your child's story</h1>
     <p class="lede" style="text-align:center;">
       Pick your family's story type, answer a few short prompts, and preview your
       book as you go. Your answers are saved in this browser as you type, so you can
       come back and finish later — when you're ready, download it as a keepsake PDF.
     </p>
-    <p id="saved-note" hidden style="text-align:center;font-size:0.85rem;color:#8a7a64;">
+    <p id="saved-note" hidden style="text-align:center;font-size:0.85rem;color:#6b5c48;">
       Saved in this browser. <button type="button" id="start-over-btn" class="link-btn">Start a new story</button>
     </p>
+    <p id="save-error" hidden role="alert" style="text-align:center;font-size:0.85rem;color:#b3261e;">
+      This browser won't let us save your progress here (common in private/incognito
+      mode, or when storage is full) — finish in one sitting, or download your book
+      before you close this tab.
+    </p>
 
-    <h3 style="text-align:center;color:var(--warm-dark);font-family:var(--font-display);font-weight:normal;">
+    <h2 id="story-type-heading" tabindex="-1" class="story-type-heading" style="text-align:center;color:var(--warm-dark);font-family:var(--font-display);font-weight:normal;font-size:1.3rem;">
       Which story are we telling?
-    </h3>
+    </h2>
     <div class="story-types" id="story-types"></div>
 
     <div id="form-section" hidden>
@@ -37,12 +65,14 @@
             <div class="book-preview" id="book-preview" style="position:relative;"></div>
             <div class="preview-controls">
               <button class="btn secondary" id="prev-page" type="button">&larr; Prev</button>
-              <span id="page-label"></span>
+              <span id="page-label" role="status" aria-live="polite"></span>
               <button class="btn secondary" id="next-page" type="button">Next &rarr;</button>
             </div>
             <div style="text-align:center;">
               <button class="btn" id="download-btn" type="button" disabled>Download your book (PDF)</button>
-              <p id="download-hint" style="font-size:0.85rem;color:#8a7a64;"></p>
+              <p id="download-hint" role="status" aria-live="polite" style="font-size:0.85rem;color:#6b5c48;"></p>
+              <p id="charset-warning" hidden role="status" aria-live="polite" style="font-size:0.85rem;color:#8a5a2b;"></p>
+              <p id="download-error" hidden role="alert" style="font-size:0.85rem;color:#b3261e;"></p>
             </div>
           </div>
         </div>
@@ -54,9 +84,15 @@
     Your answers stay in your browser and are never sent anywhere.
   </footer>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="js/prompts.js"></script>
   <script src="js/avatar.js"></script>
   <script src="js/app.js"></script>
+  <!-- Loaded last and only needed at Download time (see downloadBook()'s
+       already-handled not-yet-loaded/failed case) — placing it before the
+       local scripts would block them behind a slow third-party fetch and
+       leave the page looking dead on a slow connection. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"
+    integrity="sha512-qZvrmS2ekKPF2mSznTQsxqPgnpkI4DNTlrdUmTzrDgektczlKNRRhy5X5AAOnx5S09ydFYWWNSfcEqDTTHgtNA=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </body>
 </html>

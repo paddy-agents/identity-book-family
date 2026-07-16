@@ -143,7 +143,7 @@ h1.hero {
   padding: 1.1rem 1.2rem;
 }
 
-.principle h3 {
+.principle h2 {
   margin: 0 0 0.4rem;
   font-family: var(--font-display);
   font-size: 1.02rem;
@@ -160,23 +160,6 @@ footer.site {
 }
 
 /* --- book flow --- */
-
-.step-indicator {
-  display: flex;
-  justify-content: center;
-  gap: 0.4rem;
-  margin-bottom: 2rem;
-}
-
-.step-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--line);
-}
-
-.step-dot.active { background: var(--warm); }
-.step-dot.done { background: var(--warm-dark); }
 
 .story-types {
   display: grid;
@@ -233,7 +216,6 @@ footer.site {
 }
 
 .field input[type=text],
-.field textarea,
 .field select {
   width: 100%;
   font-family: var(--font-body);
@@ -245,7 +227,6 @@ footer.site {
   color: var(--ink);
 }
 
-.field textarea { min-height: 4.5rem; resize: vertical; }
 .field select { cursor: pointer; }
 
 .photo-upload {
@@ -263,16 +244,20 @@ footer.site {
   border: 1px solid var(--line);
 }
 
-.nav-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 1.5rem;
+.photo-upload-error {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 0.85rem;
+  color: #b3261e;
 }
 
 .builder-grid {
   display: grid;
-  grid-template-columns: 1.1fr 1fr;
+  /* minmax(0, ...) — without it, a bare `1fr` track can't shrink below its
+     content's min-content width (here, the non-wrapping preview-controls
+     row), so the grid — and the whole page — blows out horizontally on
+     narrow viewports instead of the content wrapping/shrinking to fit. */
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
   gap: 2rem;
 }
 
@@ -282,7 +267,7 @@ footer.site {
 }
 
 @media (max-width: 700px) {
-  .builder-grid { grid-template-columns: 1fr; }
+  .builder-grid { grid-template-columns: minmax(0, 1fr); }
   .preview-sticky { position: static; }
 }
 
@@ -323,13 +308,6 @@ footer.site {
   background: linear-gradient(to right, rgba(60, 45, 25, 0.16), rgba(60, 45, 25, 0));
   border-radius: 6px 0 0 6px;
   pointer-events: none;
-}
-
-.book-preview .page-label {
-  position: absolute;
-  margin-top: -220px;
-  font-size: 0.75rem;
-  color: #6b5c48;
 }
 
 .book-preview .page-text {
@@ -405,6 +383,8 @@ footer.site {
   cursor: pointer;
 }
 
+.swatch:hover { border-color: var(--warm); }
+
 .swatch.selected {
   border-color: var(--warm-dark);
   box-shadow: 0 0 0 2px var(--soft);
@@ -421,10 +401,32 @@ footer.site {
   font-family: var(--font-body);
 }
 
+.style-btn:hover { border-color: var(--warm); }
+
 .style-btn.selected {
   border-color: var(--warm);
   background: var(--soft);
-  color: var(--warm-dark);
+  color: var(--ink);
+}
+
+@media (forced-colors: active) {
+  /* The swatch's background-color IS the choice it represents (skin tone,
+     hair color, eye color) — letting forced-colors flatten it to a plain
+     white circle would erase the only information it conveys. */
+  .swatch {
+    forced-color-adjust: none;
+  }
+
+  /* border-color + box-shadow/background (the normal .selected look) are
+     both suppressed under forced-colors, making selected and unselected
+     options render identically. Highlight is a forced-colors system
+     color, so it survives and stays visible. */
+  .swatch.selected,
+  .style-btn.selected,
+  .story-type-card.selected {
+    outline: 3px solid Highlight;
+    outline-offset: 2px;
+  }
 }
 
 .book-preview .page-label-inline {
@@ -437,6 +439,7 @@ footer.site {
 
 .preview-controls {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
   align-items: center;
   gap: 1rem;
@@ -451,4 +454,51 @@ footer.site {
   .book-preview .page-text { font-size: 1.05rem; }
   .book-preview .page-title { font-size: 1.55rem; }
   .preview-scene { max-width: 160px; }
+}
+
+.print-only {
+  display: none;
+}
+
+.noscript-notice {
+  max-width: 32rem;
+  margin: 2rem auto 3rem;
+  padding: 1rem 1.25rem;
+  text-align: center;
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.noscript-notice p {
+  margin: 0 0 0.5rem;
+}
+
+.noscript-notice p:last-child {
+  margin-bottom: 0;
+}
+
+/* Printing this page directly (e.g. Ctrl/Cmd+P) instead of using the Download
+   button would otherwise print the raw form UI across many pages — show a
+   plain redirect message instead. */
+@media print {
+  header.site,
+  h1.hero,
+  main.wrap > .lede,
+  #saved-note,
+  #save-error,
+  .story-type-heading,
+  #story-types,
+  #form-section,
+  footer.site {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block;
+    max-width: 32rem;
+    margin: 3rem auto;
+    text-align: center;
+    font-family: var(--font-body, sans-serif);
+  }
 }
