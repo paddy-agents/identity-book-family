@@ -123,6 +123,8 @@ h1.hero {
   font-family: inherit;
 }
 
+.link-btn:hover { filter: brightness(0.8); }
+
 .btn:disabled {
   background: #cbbfa9;
   cursor: not-allowed;
@@ -487,6 +489,7 @@ footer.site {
   main.wrap > .lede,
   #saved-note,
   #save-error,
+  #tab-conflict-warning,
   .story-type-heading,
   #story-types,
   #form-section,

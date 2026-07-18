@@ -8,6 +8,13 @@
     previewIndex: 0,
   };
 
+  // Tracks the most recent upload started per photo field id, so that if a
+  // parent picks one photo, then quickly picks a different one before the
+  // first has finished being read/cropped (both are async), the slower
+  // first upload can't win the race and silently overwrite the second,
+  // more recent choice once it finally resolves.
+  const photoUploadSeq = {};
+
   const els = {};
 
 
@@ -26,12 +33,32 @@
     els.startOverBtn = document.getElementById('start-over-btn');
     els.savedNote = document.getElementById('saved-note');
     els.saveError = document.getElementById('save-error');
+    els.tabConflictWarning = document.getElementById('tab-conflict-warning');
 
     renderStoryTypeCards();
     els.prevBtn.addEventListener('click', () => movePreview(-1));
     els.nextBtn.addEventListener('click', () => movePreview(1));
     els.downloadBtn.addEventListener('click', downloadBook);
     if (els.startOverBtn) els.startOverBtn.addEventListener('click', startOver);
+    // Fires only in OTHER same-origin tabs when they write to localStorage —
+    // without this, editing here after another tab changed the same saved
+    // story silently overwrites that tab's progress on this tab's next save,
+    // with no warning to either tab.
+    window.addEventListener('storage', (e) => {
+      // Only warn if THIS tab actually has a story of its own that could be
+      // lost — a fresh tab that never picked a story has nothing to
+      // overwrite, so warning it about another tab's changes is a false
+      // alarm that could confuse a parent who just opened the page.
+      if (e.key === STORAGE_KEY && els.tabConflictWarning && state.storyType) {
+        // e.newValue is null when the other tab removed the key (Start Over),
+        // not edited it — "reload to see the changes" would be misleading
+        // there, since reloading actually shows an empty story, not new content.
+        els.tabConflictWarning.textContent = e.newValue === null
+          ? 'This story was cleared in another open tab (Start a new story). If you keep editing here, your changes will still be overwritten by that — reload this tab to start fresh instead.'
+          : 'This story was just changed in another open tab. If you keep editing here, those changes will be overwritten — reload this tab to see them instead.';
+        els.tabConflictWarning.hidden = false;
+      }
+    });
 
     restoreSavedProgress();
     renderPreview();
@@ -93,6 +120,11 @@
     state.answers = {};
     state.titleTouched = false;
     state.previewIndex = 0;
+    // Invalidate any photo upload still being read/cropped (both async) so
+    // it can't resolve after this reset and silently write a photo back
+    // into the answers we just cleared — same guard buildPhotoUpload's own
+    // "Remove photo" button uses for one field, applied to all of them here.
+    Object.keys(photoUploadSeq).forEach((id) => { photoUploadSeq[id] = (photoUploadSeq[id] || 0) + 1; });
     [...els.storyTypes.children].forEach((card) => {
       card.classList.remove('selected');
       card.setAttribute('aria-pressed', 'false');
@@ -105,6 +137,7 @@
     if (els.savedNote) els.savedNote.hidden = true;
     if (els.saveError) els.saveError.hidden = true;
     if (els.downloadError) els.downloadError.hidden = true;
+    if (els.tabConflictWarning) els.tabConflictWarning.hidden = true;
     delete document.body.dataset.theme;
     renderPreview();
   }
@@ -191,6 +224,15 @@
     // focus to the same field id afterwards so keyboard/screen-reader users
     // aren't dropped out of the form.
     const focusedId = els.fields.contains(document.activeElement) ? document.activeElement.id : null;
+    // Also preserve the caret position, not just which field has focus — an
+    // async trigger (e.g. a photo finishing its crop) can call renderFields()
+    // while the parent is mid-edit in a completely unrelated text field;
+    // without this, focus lands back on the right element but the caret
+    // silently jumps to the end, scrambling a mid-string edit in progress.
+    let focusedSelection = null;
+    if (focusedId && typeof document.activeElement.selectionStart === 'number') {
+      focusedSelection = [document.activeElement.selectionStart, document.activeElement.selectionEnd];
+    }
     els.fields.innerHTML = '';
 
     fields.forEach((f) => {
@@ -239,7 +281,12 @@
       } else {
         input = document.createElement('input');
         input.type = 'text';
-        input.placeholder = f.placeholder || '';
+        if (f.id === 'bookTitle') {
+          const st = STORY_TYPES.find((s) => s.id === state.storyType);
+          input.placeholder = (st && st.defaultTitle) || f.placeholder || '';
+        } else {
+          input.placeholder = f.placeholder || '';
+        }
         if (f.maxLength) input.maxLength = f.maxLength;
       }
       input.id = 'field-' + f.id;
@@ -266,7 +313,12 @@
       if (toFocus && toFocus.hidden && focusedId.endsWith('-remove')) {
         toFocus = document.getElementById(focusedId.slice(0, -'-remove'.length));
       }
-      if (toFocus) toFocus.focus();
+      if (toFocus) {
+        toFocus.focus();
+        if (focusedSelection && typeof toFocus.setSelectionRange === 'function') {
+          toFocus.setSelectionRange(focusedSelection[0], focusedSelection[1]);
+        }
+      }
     }
   }
 
@@ -300,15 +352,21 @@
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
       errorMsg.hidden = true;
+      const mySeq = (photoUploadSeq[f.id] = (photoUploadSeq[f.id] || 0) + 1);
       cropPhotoToSquare(
         file,
         (dataUrl) => {
+          // A newer upload for this same field started (and possibly
+          // already finished) while this one was still processing —
+          // discard this stale result instead of clobbering it.
+          if (photoUploadSeq[f.id] !== mySeq) return;
           state.answers[f.id] = dataUrl;
           renderFields();
           renderPreview();
           saveProgress();
         },
         () => {
+          if (photoUploadSeq[f.id] !== mySeq) return;
           fileInput.value = '';
           errorMsg.hidden = false;
         }
@@ -324,6 +382,9 @@
     removeBtn.textContent = 'Remove photo';
     removeBtn.hidden = !current;
     removeBtn.addEventListener('click', () => {
+      // Invalidate any still-in-flight upload for this field so it can't
+      // resolve after the removal and silently bring the photo back.
+      photoUploadSeq[f.id] = (photoUploadSeq[f.id] || 0) + 1;
       delete state.answers[f.id];
       renderFields();
       renderPreview();
@@ -476,6 +537,42 @@
     return (/^[aeiou]/i.test(plain) ? 'an ' : 'a ') + word;
   }
 
+  // The book's shared page.text/page.label strings mix plain English prose
+  // with whatever a parent typed (e.g. an Arabic or Hebrew name). Two
+  // separate, preview-only display fixes for that combination:
+  //
+  // 1. isolateRtlForDisplay() wraps each RTL script run in FSI/PDI isolate
+  //    marks (the same technique <bdi> uses) — standard Unicode bidi
+  //    practice so a following ASCII word/punctuation can't get reordered
+  //    relative to the RTL run.
+  // 2. hasRtlScript() flags when a page.label contains RTL text so
+  //    renderPreview() can drop the italic styling .page-label-inline
+  //    otherwise always uses. This is the fix for a real, reproducible
+  //    visual bug found live: a name like "أحمد الطيب" inside an
+  //    *italicized* label ("How أحمد الطيب joined our family") rendered
+  //    with what looked like a stray "/" at the RTL/LTR boundary whenever
+  //    the line wrapped there — a browser synthetic-italic-slant artifact
+  //    at a bidi direction change, confirmed by the glitch disappearing
+  //    with font-style:normal and persisting even with the isolate marks
+  //    from (1) alone. .page-text (the body copy) isn't italicized, so it
+  //    was never affected.
+  //
+  // Both must stay preview-only: these strings also feed the PDF's
+  // doc.text() calls and collectUnsupportedGlyphs(), and jsPDF's font
+  // can't render the isolate marks either — the PDF path already has its
+  // own honest "won't render" warning for non-Latin scripts.
+  function isolateRtlForDisplay(str) {
+    // ֐-ࣿ spans Hebrew, Arabic, Syriac, Thaana, N'Ko, and Arabic
+    // Extended-A — the RTL scripts realistically reachable via user input.
+    // ⁨/⁩ are FIRST STRONG ISOLATE / POP DIRECTIONAL ISOLATE —
+    // zero-width, no glyph of their own.
+    return str.replace(/[֐-ࣿ]+/g, '⁨$&⁩');
+  }
+
+  function hasRtlScript(str) {
+    return /[֐-ࣿ]/.test(str);
+  }
+
   function joinWithAnd(items) {
     const list = items.filter((s) => s && s.trim());
     if (list.length === 0) return '';
@@ -488,8 +585,16 @@
     const raw = a.parentsLabel === 'Other' ? (a.parentsLabelCustom || '') : (a.parentsLabel || '');
     // Custom entries commonly use "and", "&", a comma, or a semicolon to join
     // caregivers (e.g. "Grandma and Grandpa", "Grandma & Grandpa",
-    // "Grandma, Grandpa", "Mama Rae; Mama Jo").
-    return raw.split(/\s*,\s*|\s*&\s*|\s*;\s*|\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
+    // "Grandma, Grandpa", "Mama Rae; Mama Jo"). The "and" separator only
+    // matches with whitespace on both sides, so a typo that leaves it
+    // dangling at either end (e.g. "Grandma and" — second name never typed)
+    // would otherwise survive as one garbled "parent" instead of being
+    // recognized as an incomplete separator. Strip a dangling leading/
+    // trailing/standalone "and" first.
+    let trimmed = raw.trim();
+    if (/^and$/i.test(trimmed)) trimmed = '';
+    trimmed = trimmed.replace(/^and\s+/i, '').replace(/\s+and$/i, '');
+    return trimmed.split(/\s*,\s*|\s*&\s*|\s*;\s*|\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
   }
 
   function getSiblingNames(a) {
@@ -646,7 +751,23 @@
   }
 
   function renderPreview() {
+    // previewIndex is a raw array position, but buildPages() can insert/remove
+    // pages earlier in the sequence as answers change (e.g. filling in a
+    // travel place inserts a "journey" page before the closing pages) — if we
+    // kept showing the same numeric index, the reader would silently see a
+    // *different* page's content swapped in mid-edit, with no navigation
+    // action of their own. Re-anchor to the same page by content identity
+    // when it still exists; only fall back to raw clamping when it's gone
+    // (e.g. the page they were viewing was itself just removed).
+    const previousPage = (state._lastRenderedPages || [])[state.previewIndex];
     const pages = buildPages();
+    if (previousPage) {
+      const matchIndex = pages.findIndex(
+        (p) => p.kind === previousPage.kind && p.label === previousPage.label && p.text === previousPage.text
+      );
+      if (matchIndex !== -1) state.previewIndex = matchIndex;
+    }
+    state._lastRenderedPages = pages;
     if (state.previewIndex >= pages.length) state.previewIndex = pages.length - 1;
     if (state.previewIndex < 0) state.previewIndex = 0;
     const page = pages[state.previewIndex];
@@ -663,19 +784,20 @@
       }
       const t = document.createElement('div');
       t.className = 'page-title';
-      t.textContent = page.title;
+      t.textContent = isolateRtlForDisplay(page.title);
       const s = document.createElement('div');
       s.className = 'page-text';
       s.style.marginTop = '0.8rem';
       s.style.fontSize = '1.05rem';
-      s.textContent = page.subtitle;
+      s.textContent = isolateRtlForDisplay(page.subtitle);
       els.preview.appendChild(t);
       els.preview.appendChild(s);
     } else if (page.kind === 'baby-portrait' || page.kind === 'family-portrait') {
       if (page.label) {
         const l = document.createElement('div');
         l.className = 'page-label-inline';
-        l.textContent = page.label;
+        if (hasRtlScript(page.label)) l.style.fontStyle = 'normal';
+        l.textContent = isolateRtlForDisplay(page.label);
         els.preview.appendChild(l);
       }
       const img = document.createElement('img');
@@ -686,23 +808,24 @@
       const s = document.createElement('div');
       s.className = 'page-text';
       s.style.fontSize = '1rem';
-      s.textContent = page.text;
+      s.textContent = isolateRtlForDisplay(page.text);
       els.preview.appendChild(s);
     } else {
       if (page.label) {
         const l = document.createElement('div');
         l.className = 'page-label-inline';
-        l.textContent = page.label;
+        if (hasRtlScript(page.label)) l.style.fontStyle = 'normal';
+        l.textContent = isolateRtlForDisplay(page.label);
         els.preview.appendChild(l);
       }
       const s = document.createElement('div');
       s.className = 'page-text';
-      s.textContent = page.text;
+      s.textContent = isolateRtlForDisplay(page.text);
       els.preview.appendChild(s);
     }
 
     els.pageLabel.textContent = 'Page ' + (state.previewIndex + 1) + ' of ' + pages.length +
-      (page.label ? ' — ' + page.label : '');
+      (page.label ? ' — ' + isolateRtlForDisplay(page.label) : '');
     els.prevBtn.disabled = state.previewIndex === 0;
     els.nextBtn.disabled = state.previewIndex === pages.length - 1;
 
@@ -741,8 +864,19 @@
     0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x017e, 0x0178,
   ]);
 
+  // Invisible formatting codepoints (zero-width joiners, variation selectors,
+  // skin-tone modifiers, etc.) show up as their own iterator "character" in a
+  // multi-codepoint emoji sequence like a ZWJ family emoji or a skin-tone
+  // modified emoji — quoting one in the warning renders as a meaningless
+  // bare "" or an orphaned swatch glyph, since there's nothing visible to
+  // show the parent. They're just as unsupported as any other non-Latin-1
+  // glyph, so still worth warning about, but not worth quoting individually.
+  const INVISIBLE_FORMATTING = new Set([0x200b, 0x200c, 0x200d, 0xfe0e, 0xfe0f, 0xfeff]);
+  const isSkinToneModifier = (code) => code >= 0x1f3fb && code <= 0x1f3ff;
+
   function collectUnsupportedGlyphs(pages) {
     const found = new Set();
+    let hasInvisibleOnly = false;
     const texts = [];
     pages.forEach((page) => {
       texts.push(page.title, page.subtitle, page.label, page.text);
@@ -751,10 +885,21 @@
       if (typeof value !== 'string') return;
       for (const ch of value) {
         const code = ch.codePointAt(0);
-        if (code > 0xff && !WINANSI_EXTRA.has(code)) found.add(ch);
+        if (code <= 0xff || WINANSI_EXTRA.has(code)) continue;
+        if (INVISIBLE_FORMATTING.has(code) || isSkinToneModifier(code)) {
+          hasInvisibleOnly = true;
+          continue;
+        }
+        found.add(ch);
       }
     });
-    return Array.from(found);
+    const list = Array.from(found);
+    // A sequence made up ENTIRELY of invisible/modifier codepoints (rare, but
+    // possible with a lone skin-tone modifier typed with no base emoji) would
+    // otherwise silently produce zero displayed characters despite genuinely
+    // being unsupported — surface it as a plain word instead of an empty list.
+    if (!list.length && hasInvisibleOnly) list.push('a special character');
+    return list;
   }
 
   function allRequiredFilled() {

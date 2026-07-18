@@ -9,6 +9,9 @@
   <meta property="og:title" content="Create your Origin Story — Origin Stories" />
   <meta property="og:description" content="Pick your family's story type, answer a few short prompts, and download a custom keepsake book." />
   <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="Create your Origin Story — Origin Stories" />
+  <meta name="twitter:description" content="Pick your family's story type, answer a few short prompts, and download a custom keepsake book." />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none';" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%96%3C/text%3E%3C/svg%3E" />
   <link rel="stylesheet" href="css/style.css" />
 </head>
@@ -49,6 +52,10 @@
       This browser won't let us save your progress here (common in private/incognito
       mode, or when storage is full) — finish in one sitting, or download your book
       before you close this tab.
+    </p>
+    <p id="tab-conflict-warning" hidden role="alert" style="text-align:center;font-size:0.85rem;color:#b3261e;">
+      This story was just changed in another open tab. If you keep editing here,
+      those changes will be overwritten — reload this tab to see them instead.
     </p>
 
     <h2 id="story-type-heading" tabindex="-1" class="story-type-heading" style="text-align:center;color:var(--warm-dark);font-family:var(--font-display);font-weight:normal;font-size:1.3rem;">
@@ -91,8 +98,8 @@
        already-handled not-yet-loaded/failed case) — placing it before the
        local scripts would block them behind a slow third-party fetch and
        leave the page looking dead on a slow connection. -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"
-    integrity="sha512-qZvrmS2ekKPF2mSznTQsxqPgnpkI4DNTlrdUmTzrDgektczlKNRRhy5X5AAOnx5S09ydFYWWNSfcEqDTTHgtNA=="
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/4.2.1/jspdf.umd.min.js"
+    integrity="sha512-nCUCbvVNfwermh1JL+EOFGI6NGmumHoyHyAUWHD341RHtuH040x7uc9dQhKWp5nsCCLn7U6s151v2Ffk4wBwYg=="
     crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 </body>
 </html>

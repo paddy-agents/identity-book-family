@@ -7,11 +7,16 @@
  */
 (function () {
   const SKIN_TONES = [
-    { id: 'light', hex: '#f6d9be' },
-    { id: 'fair', hex: '#eec39a' },
-    { id: 'medium', hex: '#cf9d68' },
-    { id: 'tan', hex: '#a86e42' },
-    { id: 'deep', hex: '#7a4a2c' },
+    // `mouth` is the smile-stroke color drawn in drawFace — a fixed dark
+    // brown reads fine (>=4:1 contrast) against the four lighter tones, but
+    // against 'deep' skin it dropped to ~1.1:1 (WCAG needs 3:1), making the
+    // smile nearly invisible — so 'deep' gets a light warm stroke instead
+    // (>=4.7:1) while the others share the original dark one.
+    { id: 'light', hex: '#f6d9be', mouth: '#241c16' },
+    { id: 'fair', hex: '#eec39a', mouth: '#241c16' },
+    { id: 'medium', hex: '#cf9d68', mouth: '#241c16' },
+    { id: 'tan', hex: '#a86e42', mouth: '#241c16' },
+    { id: 'deep', hex: '#7a4a2c', mouth: '#e8c9a8' },
   ];
   const HAIR_COLORS = [
     { id: 'black', hex: '#2b2320' },
@@ -39,6 +44,11 @@
   function hexFor(list, id) {
     const found = list.find((x) => x.id === id);
     return found ? found.hex : list[0].hex;
+  }
+
+  function mouthHexFor(skinToneId) {
+    const found = SKIN_TONES.find((x) => x.id === skinToneId);
+    return found ? found.mouth : SKIN_TONES[0].mouth;
   }
 
   function rgbToHex(rgb) {
@@ -116,14 +126,21 @@
     ctx.fillStyle = skin;
     ctx.fill();
 
-    drawHair(ctx, cx, cy, r, avatar.hairStyle, hairColor);
-
+    // Blush is drawn BEFORE hair, not after: the 'long' hairstyle's side
+    // strands (drawHair) geometrically reach down into this same cheek
+    // region, and painting blush on top of them tinted the hair itself a
+    // visible rose color instead of just tinting the cheek. Drawing hair
+    // last means it correctly covers any blush behind it, exactly like a
+    // real hair strand in front of a cheek would. No other hairstyle's
+    // shapes reach this low, so this reorder is a no-op for them.
     ctx.fillStyle = 'rgba(220,120,110,0.28)';
     [-1, 1].forEach((side) => {
       ctx.beginPath();
       ctx.arc(cx + side * r * 0.45, cy + r * 0.32, r * 0.14, 0, Math.PI * 2);
       ctx.fill();
     });
+
+    drawHair(ctx, cx, cy, r, avatar.hairStyle, hairColor);
 
     [-1, 1].forEach((side) => {
       const ex = cx + side * r * 0.34;
@@ -149,7 +166,7 @@
 
     ctx.beginPath();
     ctx.arc(cx, cy + r * 0.2, r * 0.22, Math.PI * 0.12, Math.PI * 0.88);
-    ctx.strokeStyle = '#7a3f2c';
+    ctx.strokeStyle = mouthHexFor(avatar.skinTone);
     ctx.lineWidth = Math.max(1.5, r * 0.045);
     ctx.stroke();
   }
@@ -217,16 +234,27 @@
       const parentCount = Math.max(1, Math.min(opts.parentCount || 0, 2));
       const siblingCount = opts.siblingCount ? 1 : 0;
       const positions = parentCount === 2 ? [-1, 1] : [-1];
-      // 0.28 (not 0.24) leaves room for the widest hair styles (long/pigtails,
-      // ~1.35x the face radius) so hair never overlaps the parent silhouettes.
-      positions.forEach((side) => drawPersonSilhouette(ctx, cx + side * size * 0.28, groundY, 1, warmDarkHex, size));
-      if (siblingCount) drawPersonSilhouette(ctx, cx + size * (parentCount === 2 ? 0.42 : 0.3), groundY, 0.62, warmHex, size);
+      // Ground line is drawn BEFORE the silhouettes so their feet sit on top
+      // of it, not the other way round — the line's color (warmHex) differs
+      // from the parent silhouettes' fill (warmDarkHex), and stroking the
+      // line last used to paint a visibly mismatched-color band straight
+      // across their legs where the two overlapped.
       ctx.strokeStyle = warmHex;
       ctx.lineWidth = Math.max(1.5, size * 0.004);
       ctx.beginPath();
       ctx.moveTo(size * 0.08, groundY);
-      ctx.lineTo(size * 0.92, groundY);
+      // The two-parent+sibling combo places the sibling (scale 0.62, so its
+      // body half-width is ~0.037*size) at 0.42*size right of center — its
+      // outer edge lands at ~0.457*size, past the line's default 0.42*size
+      // right end (0.92 - 0.5 = 0.42), so it visibly hangs off the floor.
+      // Every other combo's rightmost figure stays well inside 0.42*size.
+      const lineRightEdge = parentCount === 2 && siblingCount ? 0.97 : 0.92;
+      ctx.lineTo(size * lineRightEdge, groundY);
       ctx.stroke();
+      // 0.28 (not 0.24) leaves room for the widest hair styles (long/pigtails,
+      // ~1.35x the face radius) so hair never overlaps the parent silhouettes.
+      positions.forEach((side) => drawPersonSilhouette(ctx, cx + side * size * 0.28, groundY, 1, warmDarkHex, size));
+      if (siblingCount) drawPersonSilhouette(ctx, cx + size * (parentCount === 2 ? 0.42 : 0.3), groundY, 0.62, warmHex, size);
       drawFace(ctx, cx, groundY - size * 0.17, size * 0.15, avatar);
       return canvas.toDataURL('image/png');
     }

@@ -78,6 +78,9 @@ const FAMILY_FIELDS = [
     label: 'Book title',
     hint: 'A default is filled in — change it if you like.',
     type: 'text',
+    // Overridden per story type in renderFields() (see app.js) so it always
+    // matches that type's actual defaultTitle fallback — this static value is
+    // only a safety net if that lookup somehow fails.
     placeholder: 'How Our Family Grew',
     maxLength: 60,
   },
@@ -247,7 +250,7 @@ const ORIGIN_FIELDS = {
     {
       id: 'donorInvolved',
       label: 'Did a donor help your family — an egg, sperm, or embryo gift?',
-      hint: 'Experts encourage naming this plainly and early rather than leaving it out. Your answer shapes the story on the next page.',
+      hint: 'Experts encourage naming this plainly and early rather than leaving it out. Your answer shapes the story of how your family came to be.',
       type: 'select',
       options: ['No — just science and us', 'Yes — an egg or sperm donor', 'Yes — a donor embryo'],
       default: 'No — just science and us',
