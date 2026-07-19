@@ -125,6 +125,19 @@
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.fillStyle = skin;
     ctx.fill();
+    // The 'baby'/'family' scenes draw this face on top of a theme-tinted
+    // card (THEMES[x].SOFT in app.js) — the two lightest skin tones ('light',
+    // 'fair') measure a WCAG contrast of only ~1.0-1.3 against every one of
+    // the 4 themes' SOFT color, so without an outline the face was nearly
+    // invisible, floating as just eyes/mouth with no visible head shape. A
+    // single fixed dark stroke works for every skin tone/theme combination
+    // because what matters is stroke-vs-background contrast (>=7.9 in all 4
+    // themes), not stroke-vs-skin — even where the stroke nearly matches a
+    // dark skin tone, that tone already contrasts fine against the
+    // background on its own.
+    ctx.strokeStyle = '#4a3626';
+    ctx.lineWidth = Math.max(1, r * 0.025);
+    ctx.stroke();
 
     // Blush is drawn BEFORE hair, not after: the 'long' hairstyle's side
     // strands (drawHair) geometrically reach down into this same cheek
@@ -234,6 +247,15 @@
       const parentCount = Math.max(1, Math.min(opts.parentCount || 0, 2));
       const siblingCount = opts.siblingCount ? 1 : 0;
       const positions = parentCount === 2 ? [-1, 1] : [-1];
+      // With 2 parents, the parent-child-parent triptych is already centered
+      // on cx. With exactly 1 parent and 0 siblings, though, pinning the
+      // face to cx left the lone parent hanging off to one side with a
+      // lopsided gap of empty canvas on the other — the pair reads as
+      // off-center rather than composed. Shift both by half the tuned
+      // parent<->face gap (0.28*size) so their midpoint lands on cx while
+      // preserving that exact gap (it's sized for hair-style clearance).
+      const soloDuo = parentCount === 1 && !siblingCount;
+      const faceCx = soloDuo ? cx + size * 0.14 : cx;
       // Ground line is drawn BEFORE the silhouettes so their feet sit on top
       // of it, not the other way round — the line's color (warmHex) differs
       // from the parent silhouettes' fill (warmDarkHex), and stroking the
@@ -253,9 +275,9 @@
       ctx.stroke();
       // 0.28 (not 0.24) leaves room for the widest hair styles (long/pigtails,
       // ~1.35x the face radius) so hair never overlaps the parent silhouettes.
-      positions.forEach((side) => drawPersonSilhouette(ctx, cx + side * size * 0.28, groundY, 1, warmDarkHex, size));
+      positions.forEach((side) => drawPersonSilhouette(ctx, faceCx + side * size * 0.28, groundY, 1, warmDarkHex, size));
       if (siblingCount) drawPersonSilhouette(ctx, cx + size * (parentCount === 2 ? 0.42 : 0.3), groundY, 0.62, warmHex, size);
-      drawFace(ctx, cx, groundY - size * 0.17, size * 0.15, avatar);
+      drawFace(ctx, faceCx, groundY - size * 0.17, size * 0.15, avatar);
       return canvas.toDataURL('image/png');
     }
 

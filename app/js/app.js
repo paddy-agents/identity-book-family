@@ -59,6 +59,23 @@
         els.tabConflictWarning.hidden = false;
       }
     });
+    // Without this, a photo dropped anywhere on the page except squarely on
+    // the small file-upload button falls through to the browser's own
+    // default drop handling — which navigates the whole tab away to display
+    // the raw dropped file, silently destroying every answer typed so far.
+    // <input type="file"> has its own native (and wanted) drop-to-select
+    // behavior, so it's excluded from the guard. Scoped to actual file drops
+    // (dataTransfer.types includes "Files") — an earlier version of this
+    // guard blocked ALL drops unconditionally, which also silently broke the
+    // browser's native "drop selected text into a text field" behavior on
+    // every field in the form.
+    window.addEventListener('dragover', (e) => e.preventDefault());
+    window.addEventListener('drop', (e) => {
+      const isFileDrop = e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+      if (isFileDrop && (!(e.target instanceof HTMLInputElement) || e.target.type !== 'file')) {
+        e.preventDefault();
+      }
+    });
 
     restoreSavedProgress();
     renderPreview();
@@ -183,6 +200,11 @@
 
     els.formSection.hidden = false;
     if (els.downloadError) els.downloadError.hidden = true;
+    // A story-type switch immediately saves (below), so this tab is about to
+    // overwrite whatever the other tab wrote — the warning's own "your
+    // changes will be overwritten" framing would be stale/backwards if left
+    // showing past this point (same reasoning startOver() already applies).
+    if (els.tabConflictWarning) els.tabConflictWarning.hidden = true;
     renderFields();
     renderPreview();
     saveProgress();
@@ -340,6 +362,7 @@
 
     const errorMsg = document.createElement('p');
     errorMsg.className = 'photo-upload-error';
+    errorMsg.id = 'field-' + f.id + '-error';
     errorMsg.setAttribute('role', 'alert');
     errorMsg.hidden = true;
     errorMsg.textContent = "That file couldn't be used as a photo — please try a JPG or PNG image.";
@@ -367,8 +390,16 @@
         },
         () => {
           if (photoUploadSeq[f.id] !== mySeq) return;
-          fileInput.value = '';
-          errorMsg.hidden = false;
+          // Look these up fresh by id instead of trusting the fileInput/
+          // errorMsg closures — an unrelated field change (numSiblings/
+          // parentsLabel/adoptionPath) can trigger a renderFields() DOM
+          // rebuild while this crop is still in flight, which detaches the
+          // originals from the page. Writing to the detached elements
+          // silently produced no visible error at all.
+          const liveInput = document.getElementById('field-' + f.id);
+          const liveError = document.getElementById('field-' + f.id + '-error');
+          if (liveInput) liveInput.value = '';
+          if (liveError) liveError.hidden = false;
         }
       );
     });
@@ -456,6 +487,12 @@
       options.forEach((opt) => {
         const btn = document.createElement('button');
         btn.type = 'button';
+        // renderFields()'s focus-restore logic (used whenever an unrelated
+        // field change or an async photo-crop finishing rebuilds the whole
+        // form) looks up the previously-focused element by id — with no id
+        // here, a parent mid-click on an avatar swatch/style button would
+        // silently lose focus to <body> on any rebuild.
+        btn.id = 'avatar-' + key + '-' + opt.id;
         render(btn, opt);
         btn.classList.toggle('selected', avatar[key] === opt.id);
         btn.setAttribute('aria-pressed', String(avatar[key] === opt.id));
@@ -594,7 +631,13 @@
     let trimmed = raw.trim();
     if (/^and$/i.test(trimmed)) trimmed = '';
     trimmed = trimmed.replace(/^and\s+/i, '').replace(/\s+and$/i, '');
-    return trimmed.split(/\s*,\s*|\s*&\s*|\s*;\s*|\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
+    // The Oxford-comma phrasing "Mom, Dad, and Grandma" is the single most
+    // natural way to type a 3+ name list — but without special-casing it, the
+    // comma alternative below matches first and greedily eats the space
+    // before "and", so the standalone \s+and\s+ alternative never gets a
+    // chance to fire and "and Grandma" survives as one garbled name. Let the
+    // comma separator optionally swallow a following "and " too.
+    return trimmed.split(/\s*,\s*(?:and\s+)?|\s*&\s*|\s*;\s*|\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
   }
 
   function getSiblingNames(a) {
@@ -667,7 +710,13 @@
       let text = parentsPhrase + ' traveled';
       if (a.travelPlace && a.travelPlace.trim()) text += ' to ' + a.travelPlace.trim();
       if (a.travelDuration && a.travelDuration.trim()) text += ' — ' + a.travelDuration.trim() + ' of waiting and love';
-      text += ' to meet ' + name + '.';
+      // Kinship adoption's own origin sentence is built on the opposite premise
+      // of every other path — the child was already known and loved, not met
+      // for the first time — so "to meet [name]" here would directly
+      // contradict the page right before it. Reuses the same "bring home"
+      // framing International adoption's origin sentence already uses.
+      const isKinship = state.storyType === 'adoption' && a.adoptionPath === 'Kinship / relative adoption';
+      text += isKinship ? ' to bring ' + name + ' home.' : ' to meet ' + name + '.';
       pages.push({ kind: 'text', label: 'The journey', text: text, motif: 'plane' });
     }
 
@@ -717,10 +766,10 @@
       return 'A ' + helper + ' carried ' + name + ' and kept ' + name + ' safe until it was time to meet ' + parentsPhrase + '.';
     }
     if (storyTypeId === 'ivf') {
-      const detail = a.helperDetail && a.helperDetail.trim() ? a.helperDetail.trim() : 'doctors helped us';
+      const detail = a.helperDetail && a.helperDetail.trim() ? a.helperDetail.trim() : 'a little help from science';
       // Donor conception is a true, distinct part of some families' stories —
-      // named plainly here rather than folded silently into "doctors helped
-      // us" (see docs/family-language-review.md).
+      // named plainly here rather than folded silently into this detail
+      // (see docs/family-language-review.md).
       if (a.donorInvolved === 'Yes — an egg or sperm donor') {
         return parentsPhrase + ' wanted ' + name + ' so much — ' + detail + ', with a generous donor’s help, and then, there ' + name + ' was!';
       }
