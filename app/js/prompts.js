@@ -211,6 +211,7 @@ const ORIGIN_FIELDS = {
     {
       id: 'travelPlace',
       label: 'Where did you travel to meet your child?',
+      hint: 'A city or state — optional, skip if there was no trip.',
       type: 'text',
       placeholder: 'e.g. Rhode Island',
       required: false,
@@ -316,4 +317,16 @@ function getOriginFieldsFor(storyTypeId) {
 // fields (js/app.js inserts those after numSiblings based on its current value).
 function getFieldsFor(storyTypeId) {
   return [...FAMILY_FIELDS, ...getOriginFieldsFor(storyTypeId), ...CLOSING_FIELDS];
+}
+
+// Clamps a raw numSiblings value into the range the field's own <select>
+// actually offers. Without this, an out-of-range value (e.g. hand-edited or
+// corrupted localStorage) generates one sibling-name field per count with no
+// upper bound — a real, reachable failure mode since numSiblings is read
+// straight from saved state, not re-validated against the select options.
+function clampSiblingCount(raw) {
+  const max = Math.max(...FAMILY_FIELDS.find((f) => f.id === 'numSiblings').options.map(Number));
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(n, max);
 }

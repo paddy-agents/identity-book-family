@@ -15,6 +15,18 @@
   // more recent choice once it finally resolves.
   const photoUploadSeq = {};
 
+  // True from the moment Download disables its button until buildAndSaveDoc()
+  // finishes (two requestAnimationFrame callbacks later — see downloadBook()).
+  // A blocking confirm()/alert() dialog pauses queued rAF callbacks along with
+  // the rest of the event loop, so a parent who clicks Download, then Start
+  // a new story (which opens a confirm()) before those two frames have
+  // painted, can clear state.answers/state.storyType out from under the
+  // still-pending PDF build — it would resume once the dialog closes and
+  // silently save a bogus, empty-state PDF. Guarding startOver()/
+  // selectStoryType() on this flag closes that window (and the equivalent,
+  // dialog-free race against a fast story-type-card click).
+  let isGeneratingPdf = false;
+
   const els = {};
 
 
@@ -127,6 +139,7 @@
   }
 
   function startOver() {
+    if (isGeneratingPdf) return;
     if (!confirm("Clear everything you've entered and start a new story?")) return;
     try {
       localStorage.removeItem(STORAGE_KEY);
@@ -174,6 +187,7 @@
   }
 
   function selectStoryType(id) {
+    if (isGeneratingPdf) return;
     // joyfulDetail is the one field id every story type reuses for a
     // DIFFERENT question ("about your birth family" vs "about your
     // surrogate" vs "a milestone" vs "about the family you joined") — unlike
@@ -220,7 +234,7 @@
     fields.forEach((f) => {
       if (f.id === 'numSiblings') {
         out.push(f);
-        const n = parseInt(state.answers.numSiblings || f.default || '0', 10);
+        const n = clampSiblingCount(state.answers.numSiblings || f.default || '0');
         for (let i = 1; i <= n; i++) out.push(siblingField(i));
         return;
       }
@@ -266,26 +280,37 @@
       // The avatar builder is a group of buttons/swatches, not one control
       // with a matching 'field-<id>' element — a `for` here would point at
       // nothing and orphan the label for screen readers and label clicks.
+      // Give it an id instead so the group below can reference it via
+      // aria-labelledby.
       if (f.type !== 'avatar') {
         label.setAttribute('for', 'field-' + f.id);
+      } else {
+        label.id = 'field-' + f.id + '-label';
       }
       wrap.appendChild(label);
 
+      // Give the hint an id and wire it up via aria-describedby below —
+      // otherwise a screen-reader user who tabs straight into a field
+      // (rather than reading the page linearly) never hears it, since DOM
+      // proximity to the label alone isn't enough to associate it.
+      let hintId = null;
       if (f.hint) {
         const hint = document.createElement('span');
         hint.className = 'hint';
+        hint.id = 'field-' + f.id + '-hint';
         hint.textContent = f.hint;
         wrap.appendChild(hint);
+        hintId = hint.id;
       }
 
       if (f.type === 'photo') {
-        wrap.appendChild(buildPhotoUpload(f));
+        wrap.appendChild(buildPhotoUpload(f, hintId));
         els.fields.appendChild(wrap);
         return;
       }
 
       if (f.type === 'avatar') {
-        wrap.appendChild(buildAvatarBuilder(f));
+        wrap.appendChild(buildAvatarBuilder(f, hintId));
         els.fields.appendChild(wrap);
         return;
       }
@@ -313,6 +338,7 @@
       }
       input.id = 'field-' + f.id;
       input.value = value;
+      if (hintId) input.setAttribute('aria-describedby', hintId);
       state.answers[f.id] = value;
 
       // A single 'input' listener is enough — <select> fires both 'input' and
@@ -348,7 +374,7 @@
   // field. Handled separately from the generic select/text inputs above
   // because a <input type=file> can't be pre-filled with a value — the
   // stored data URL lives only in state.answers.childPhoto.
-  function buildPhotoUpload(f) {
+  function buildPhotoUpload(f, hintId) {
     const uploadWrap = document.createElement('div');
     uploadWrap.className = 'photo-upload';
     const current = state.answers[f.id];
@@ -371,6 +397,7 @@
     fileInput.type = 'file';
     fileInput.accept = 'image/*';
     fileInput.id = 'field-' + f.id;
+    if (hintId) fileInput.setAttribute('aria-describedby', hintId);
     fileInput.addEventListener('change', () => {
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
@@ -462,11 +489,17 @@
   // updates state.answers.childAvatar in place, then re-renders the small
   // thumbnail here plus the book preview — mirroring buildPhotoUpload's
   // update pattern above.
-  function buildAvatarBuilder(f) {
+  function buildAvatarBuilder(f, hintId) {
     ensureAvatarDefaults();
     const avatar = state.answers.childAvatar;
     const wrap = document.createElement('div');
     wrap.className = 'avatar-builder';
+    // Not one control like a text input/file input — apply the hint at the
+    // group level so screen readers announce it when entering the group,
+    // even though it isn't re-announced per individual swatch button.
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-labelledby', 'field-' + f.id + '-label');
+    if (hintId) wrap.setAttribute('aria-describedby', hintId);
 
     const thumb = document.createElement('img');
     thumb.className = 'avatar-thumb';
@@ -620,28 +653,27 @@
 
   function getParentsList(a) {
     const raw = a.parentsLabel === 'Other' ? (a.parentsLabelCustom || '') : (a.parentsLabel || '');
-    // Custom entries commonly use "and", "&", a comma, or a semicolon to join
-    // caregivers (e.g. "Grandma and Grandpa", "Grandma & Grandpa",
-    // "Grandma, Grandpa", "Mama Rae; Mama Jo"). The "and" separator only
-    // matches with whitespace on both sides, so a typo that leaves it
-    // dangling at either end (e.g. "Grandma and" — second name never typed)
-    // would otherwise survive as one garbled "parent" instead of being
-    // recognized as an incomplete separator. Strip a dangling leading/
-    // trailing/standalone "and" first.
-    let trimmed = raw.trim();
-    if (/^and$/i.test(trimmed)) trimmed = '';
-    trimmed = trimmed.replace(/^and\s+/i, '').replace(/\s+and$/i, '');
-    // The Oxford-comma phrasing "Mom, Dad, and Grandma" is the single most
-    // natural way to type a 3+ name list — but without special-casing it, the
-    // comma alternative below matches first and greedily eats the space
-    // before "and", so the standalone \s+and\s+ alternative never gets a
-    // chance to fire and "and Grandma" survives as one garbled name. Let the
-    // comma separator optionally swallow a following "and " too.
-    return trimmed.split(/\s*,\s*(?:and\s+)?|\s*&\s*|\s*;\s*|\s+and\s+/i).map((s) => s.trim()).filter(Boolean);
+    // Custom entries commonly join caregivers with "and", "&", a comma, a
+    // semicolon, or a slash (e.g. "Grandma and Grandpa", "Grandma & Grandpa",
+    // "Grandma, Grandpa", "Mama Rae; Mama Jo", "Mommy/Daddy"). Treat the
+    // standalone word "and" as just another separator BEFORE splitting on
+    // punctuation, rather than only recognizing it when it's whitespace-
+    // bounded on both sides — otherwise "and" landing right next to a
+    // punctuation separator (a redundant Oxford comma "Mom, Dad, and,
+    // Grandma", a comma placed before instead of after it "Mom and, Dad",
+    // "Mom; and Dad", or a doubled "Mom and and Dad") survives as its own
+    // fake "parent" literally named "and", or stays glued to a real name.
+    // \band\b won't fire inside a name like "Anderson" or "Sandy" — a word
+    // boundary requires a transition to/from a non-word character.
+    return raw
+      .replace(/\band\b/gi, ',')
+      .split(/[,&;/]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
   }
 
   function getSiblingNames(a) {
-    const n = parseInt(a.numSiblings || '0', 10);
+    const n = clampSiblingCount(a.numSiblings || '0');
     const names = [];
     for (let i = 1; i <= n; i++) {
       if (a['siblingName' + i] && a['siblingName' + i].trim()) names.push(a['siblingName' + i].trim());
@@ -1016,6 +1048,7 @@
     // before doing the blocking work, so the "Generating…" state is actually
     // visible for the duration of the freeze.
     els.downloadBtn.disabled = true;
+    isGeneratingPdf = true;
     const originalLabel = els.downloadBtn.textContent;
     els.downloadBtn.textContent = 'Generating your book…';
     els.downloadHint.textContent = 'Generating your book — this can take a few seconds for a longer story.';
@@ -1029,6 +1062,7 @@
           els.downloadError.textContent =
             "We couldn't create your PDF — please check your internet connection and try again.";
         } finally {
+          isGeneratingPdf = false;
           els.downloadBtn.textContent = originalLabel;
           els.downloadBtn.disabled = !state.storyType || !allRequiredFilled();
           els.downloadHint.textContent = els.downloadBtn.disabled
