@@ -105,7 +105,12 @@
     state.storyType = saved.storyType;
     state.answers = saved.answers || {};
     state.titleTouched = !!saved.titleTouched;
-    state.previewIndex = saved.previewIndex || 0;
+    // Guard against corrupted/hand-edited localStorage: a non-numeric value
+    // (e.g. 'x') coerces to NaN, and NaN fails every numeric comparison in
+    // renderPreview()'s own clamp (`>= pages.length` / `< 0`), so it would
+    // otherwise sail through as an invalid array index and crash on `.kind`.
+    const restoredIndex = parseInt(saved.previewIndex, 10);
+    state.previewIndex = Number.isFinite(restoredIndex) && restoredIndex >= 0 ? restoredIndex : 0;
 
     [...els.storyTypes.children].forEach((card) => {
       const isSelected = card.dataset.id === state.storyType;
@@ -590,7 +595,13 @@
   function onFieldChange(f, input) {
     return () => {
       if (f.id === 'bookTitle') state.titleTouched = true;
-      state.answers[f.id] = input.value;
+      // A pasted value can carry control characters a single-line <input>
+      // doesn't strip on its own (e.g. a tab survives even though pressing
+      // the Tab key just moves focus — a real scenario when copying two
+      // names out of adjacent spreadsheet cells). jsPDF renders a raw tab
+      // as a large blank gap rather than a space, so normalize any control
+      // character to a plain space before it reaches state.
+      state.answers[f.id] = input.value.replace(/[\x00-\x1f\x7f]/g, ' ');
       // numSiblings/parentsLabel/adoptionPath changes may add/remove dependent fields.
       if (f.id === 'numSiblings' || f.id === 'parentsLabel' || f.id === 'adoptionPath') {
         renderFields();
@@ -643,6 +654,19 @@
     return /[֐-ࣿ]/.test(str);
   }
 
+  // Several free-text fields (pet name, travel duration/place, IVF's "how
+  // did you get help" phrase) get spliced mid-sentence rather than shown as
+  // their own standalone page — a trailing period a parent naturally typed
+  // ("Biscuit.", "2 weeks.") then produced a doubled/misplaced period, e.g.
+  // "a pet named Biscuit.." or "— 2 weeks. of waiting and love". Only strips
+  // from the END of the string, so it's safe to apply even to values that
+  // happen to already read fine (nothing to strip). Fields that ARE shown as
+  // their own complete sentence (joyfulDetail, promise, signOff) intentionally
+  // keep whatever punctuation the parent wrote.
+  function stripTrailingPunctuation(str) {
+    return str.replace(/[.!?,;]+$/, '');
+  }
+
   function joinWithAnd(items) {
     const list = items.filter((s) => s && s.trim());
     if (list.length === 0) return '';
@@ -685,12 +709,19 @@
     ensureAvatarDefaults();
     const a = state.answers;
     const st = STORY_TYPES.find((s) => s.id === state.storyType) || STORY_TYPES[0];
-    const name = a.childName && a.childName.trim() ? a.childName.trim() : 'you';
+    // 'your child' (not 'you') so the placeholder reads correctly no matter
+    // whether `name` lands as a subject ("your child was already loved by..."),
+    // object ("...held your child"), or possessive ("...to be your child's
+    // family, forever") — 'you' broke in the subject/possessive cases
+    // ("you was...", "you's family"), visible in the live preview to every
+    // new user before they've typed a name (childName is required, so this
+    // never reaches an actual downloaded PDF).
+    const name = a.childName && a.childName.trim() ? a.childName.trim() : 'your child';
     const title = a.bookTitle && a.bookTitle.trim() ? a.bookTitle.trim() : st.defaultTitle;
     const season = a.season || 'spring';
     const parents = getParentsList(a);
     const siblings = getSiblingNames(a);
-    const pet = a.petName && a.petName.trim() ? a.petName.trim() : '';
+    const pet = a.petName && a.petName.trim() ? stripTrailingPunctuation(a.petName.trim()) : '';
     const parentsPhrase = joinWithAnd(parents) || 'a family';
 
     const members = [
@@ -740,15 +771,21 @@
     const hasTravelField = getFieldsFor(state.storyType).some((f) => f.id === 'travelPlace');
     if (hasTravelField && ((a.travelPlace && a.travelPlace.trim()) || (a.travelDuration && a.travelDuration.trim()))) {
       let text = parentsPhrase + ' traveled';
-      if (a.travelPlace && a.travelPlace.trim()) text += ' to ' + a.travelPlace.trim();
-      if (a.travelDuration && a.travelDuration.trim()) text += ' — ' + a.travelDuration.trim() + ' of waiting and love';
-      // Kinship adoption's own origin sentence is built on the opposite premise
-      // of every other path — the child was already known and loved, not met
-      // for the first time — so "to meet [name]" here would directly
-      // contradict the page right before it. Reuses the same "bring home"
-      // framing International adoption's origin sentence already uses.
-      const isKinship = state.storyType === 'adoption' && a.adoptionPath === 'Kinship / relative adoption';
-      text += isKinship ? ' to bring ' + name + ' home.' : ' to meet ' + name + '.';
+      if (a.travelPlace && a.travelPlace.trim()) text += ' to ' + stripTrailingPunctuation(a.travelPlace.trim());
+      if (a.travelDuration && a.travelDuration.trim())
+        text += ' — ' + stripTrailingPunctuation(a.travelDuration.trim()) + ' of waiting and love';
+      // Kinship AND International adoption's own origin sentences are both
+      // built on an "already brought/home" premise (see buildOriginSentence),
+      // not "met for the first time" — so "to meet [name]" here would
+      // directly contradict the page right before it for either path. This
+      // used to only check Kinship even though the comment already noted
+      // International's origin sentence used the same "bring home" framing —
+      // a real, reachable bug since travelPlace/travelDuration are exactly
+      // the fields the international-adoption path's own form invites a
+      // parent to fill in.
+      const bringsHome = state.storyType === 'adoption' &&
+        (a.adoptionPath === 'Kinship / relative adoption' || a.adoptionPath === 'International adoption');
+      text += bringsHome ? ' to bring ' + name + ' home.' : ' to meet ' + name + '.';
       pages.push({ kind: 'text', label: 'The journey', text: text, motif: 'plane' });
     }
 
@@ -798,7 +835,10 @@
       return 'A ' + helper + ' carried ' + name + ' and kept ' + name + ' safe until it was time to meet ' + parentsPhrase + '.';
     }
     if (storyTypeId === 'ivf') {
-      const detail = a.helperDetail && a.helperDetail.trim() ? a.helperDetail.trim() : 'a little help from science';
+      const detail =
+        a.helperDetail && a.helperDetail.trim()
+          ? stripTrailingPunctuation(a.helperDetail.trim())
+          : 'a little help from science';
       // Donor conception is a true, distinct part of some families' stories —
       // named plainly here rather than folded silently into this detail
       // (see docs/family-language-review.md).
@@ -811,7 +851,10 @@
       return parentsPhrase + ' wanted ' + name + ' so much — ' + detail + ', and then, there ' + name + ' was!';
     }
     if (storyTypeId === 'blended') {
-      const how = a.howCame && a.howCame.trim() ? a.howCame.trim() : 'met, fell in love, and became one family';
+      const how =
+        a.howCame && a.howCame.trim()
+          ? stripTrailingPunctuation(a.howCame.trim())
+          : 'met, fell in love, and became one family';
       return parentsPhrase + ' ' + how + ', and that is how our family grew.';
     }
     // adoption — the story differs by real path (see docs/adoption-language-review.md):
@@ -945,14 +988,18 @@
     0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x017e, 0x0178,
   ]);
 
-  // Invisible formatting codepoints (zero-width joiners, variation selectors,
-  // skin-tone modifiers, etc.) show up as their own iterator "character" in a
-  // multi-codepoint emoji sequence like a ZWJ family emoji or a skin-tone
-  // modified emoji — quoting one in the warning renders as a meaningless
-  // bare "" or an orphaned swatch glyph, since there's nothing visible to
-  // show the parent. They're just as unsupported as any other non-Latin-1
-  // glyph, so still worth warning about, but not worth quoting individually.
-  const INVISIBLE_FORMATTING = new Set([0x200b, 0x200c, 0x200d, 0xfe0e, 0xfe0f, 0xfeff]);
+  // Invisible-when-rendered codepoints (zero-width joiners, variation
+  // selectors, bidi/directional marks, line/paragraph separators, skin-tone
+  // modifiers, etc.) show up as their own iterator "character" in things like
+  // a ZWJ family emoji, a skin-tone modified emoji, or a pasted U+2028 line
+  // separator — quoting one in the warning renders as a meaningless bare ""
+  // or an orphaned swatch glyph, since there's nothing visible to show the
+  // parent. They're just as unsupported as any other non-Latin-1 glyph, so
+  // still worth warning about, but not worth quoting individually. Covers the
+  // whole Unicode "format" (Cf) and line/paragraph-separator (Zl/Zp)
+  // categories rather than an explicit codepoint list, since the exact set of
+  // invisible characters a parent could paste in is open-ended.
+  const isInvisibleFormatting = (ch) => /^[\p{Cf}\p{Zl}\p{Zp}]$/u.test(ch);
   const isSkinToneModifier = (code) => code >= 0x1f3fb && code <= 0x1f3ff;
 
   function collectUnsupportedGlyphs(pages) {
@@ -967,7 +1014,7 @@
       for (const ch of value) {
         const code = ch.codePointAt(0);
         if (code <= 0xff || WINANSI_EXTRA.has(code)) continue;
-        if (INVISIBLE_FORMATTING.has(code) || isSkinToneModifier(code)) {
+        if (isInvisibleFormatting(ch) || isSkinToneModifier(code)) {
           hasInvisibleOnly = true;
           continue;
         }

@@ -113,7 +113,13 @@ const FAMILY_FIELDS = [
     placeholder: 'e.g. Grandma and Grandpa',
     showIf: (a) => a.parentsLabel === 'Other',
     required: true,
-    maxLength: 40,
+    // Unlike a single name, this field routinely holds a whole list of
+    // caregivers (getParentsList() supports splitting on ,/&/;// and "and" —
+    // see js/app.js) — a plain 40-char cap silently truncated a natural
+    // 6-name list mid-word into garbled prose ("...Papa Kim, and an A."),
+    // found live 2026-07-21. 80 comfortably fits several short names while
+    // still bounding PDF layout the way every other field's cap does.
+    maxLength: 80,
   },
   {
     id: 'numSiblings',

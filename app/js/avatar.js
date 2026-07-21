@@ -21,9 +21,21 @@
   const HAIR_COLORS = [
     { id: 'black', hex: '#2b2320' },
     { id: 'brown', hex: '#5b3a29' },
-    { id: 'blonde', hex: '#d8b46a' },
+    // The original #d8b46a was only ~1.4-1.5:1 against every theme's SOFT
+    // card background in the baby/family scenes (need 3:1) — the same
+    // "hair has no outline stroke, so fill alone must carry contrast" bug
+    // class already fixed once for 'gray', just worse. Darkened to a deep
+    // honey-blonde that still reads as blonde (>=4.1:1 in all 4 themes).
+    { id: 'blonde', hex: '#7d5f2a' },
     { id: 'red', hex: '#a24a2a' },
-    { id: 'gray', hex: '#b8b0a6' },
+    // Unlike the face circle, hair has no outline stroke, so its own fill
+    // needs to carry enough contrast on its own. The original #b8b0a6 was
+    // only ~1.5-1.7:1 against every theme's SOFT card background in the
+    // baby/family scenes (need 3:1) — nearly invisible, the same bug class
+    // already fixed once for the two lightest skin tones. Darkened to a
+    // muted steel-gray that still reads as "gray hair" (>=4:1 in all 4
+    // themes).
+    { id: 'gray', hex: '#69645c' },
   ];
   const EYE_COLORS = [
     { id: 'brown', hex: '#5b3a29' },
@@ -114,17 +126,6 @@
     const hairColor = hexFor(HAIR_COLORS, avatar.hairColor);
     const eyeColor = hexFor(EYE_COLORS, avatar.eyeColor);
 
-    ctx.fillStyle = skin;
-    [-1, 1].forEach((side) => {
-      ctx.beginPath();
-      ctx.arc(cx + side * r * 0.98, cy + r * 0.05, r * 0.16, 0, Math.PI * 2);
-      ctx.fill();
-    });
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = skin;
-    ctx.fill();
     // The 'baby'/'family' scenes draw this face on top of a theme-tinted
     // card (THEMES[x].SOFT in app.js) — the two lightest skin tones ('light',
     // 'fair') measure a WCAG contrast of only ~1.0-1.3 against every one of
@@ -137,6 +138,23 @@
     // background on its own.
     ctx.strokeStyle = '#4a3626';
     ctx.lineWidth = Math.max(1, r * 0.025);
+
+    ctx.fillStyle = skin;
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.arc(cx + side * r * 0.98, cy + r * 0.05, r * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+      // The ear pokes out past the main head circle's own stroked boundary
+      // (below) — without its own stroke, that exposed sliver was the same
+      // near-invisible unstroked skin-on-background patch the fix above
+      // solves for the head, just missed for this smaller shape.
+      ctx.stroke();
+    });
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = skin;
+    ctx.fill();
     ctx.stroke();
 
     // Blush is drawn BEFORE hair, not after: the 'long' hairstyle's side

@@ -110,7 +110,11 @@ h1.hero {
   border: 1.5px solid var(--warm);
 }
 
-.btn.secondary:hover { background: var(--soft); }
+/* color switches to --ink (not --warm-dark) on hover: --warm-dark on --soft
+   computes to only 3.92:1/4.09:1 in the adoption/blended themes, below the
+   4.5:1 AA minimum — --ink clears 9.8-11.0:1 in every theme (see
+   :root/body[data-theme] above). */
+.btn.secondary:hover { background: var(--soft); color: var(--ink); }
 
 .link-btn {
   background: none;
@@ -236,6 +240,14 @@ footer.site {
   align-items: center;
   gap: 0.8rem;
   flex-wrap: wrap;
+}
+
+.photo-upload input[type=file] {
+  /* A native file input's intrinsic content width (its button + filename
+     text) doesn't shrink to fit a narrow flex container on its own —
+     unlike every other input in the form, it needs an explicit cap. */
+  max-width: 100%;
+  min-width: 0;
 }
 
 .photo-thumb {
@@ -480,20 +492,23 @@ footer.site {
   margin-bottom: 0;
 }
 
-/* Printing this page directly (e.g. Ctrl/Cmd+P) instead of using the Download
+/* Printing book.html directly (e.g. Ctrl/Cmd+P) instead of using the Download
    button would otherwise print the raw form UI across many pages — show a
-   plain redirect message instead. */
+   plain redirect message instead. Scoped to body.book-page (book.html only) —
+   index.html shares header.site/h1.hero/.lede/footer.site but is a plain
+   static page with nothing broken to redirect away from, so it should just
+   print normally. */
 @media print {
-  header.site,
-  h1.hero,
-  main.wrap > .lede,
-  #saved-note,
-  #save-error,
-  #tab-conflict-warning,
-  .story-type-heading,
-  #story-types,
-  #form-section,
-  footer.site {
+  body.book-page header.site,
+  body.book-page h1.hero,
+  body.book-page main.wrap > .lede,
+  body.book-page #saved-note,
+  body.book-page #save-error,
+  body.book-page #tab-conflict-warning,
+  body.book-page .story-type-heading,
+  body.book-page #story-types,
+  body.book-page #form-section,
+  body.book-page footer.site {
     display: none !important;
   }
 
