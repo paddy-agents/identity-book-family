@@ -249,6 +249,12 @@
       const cx = size / 2;
       const cy = size * 0.42;
       const r = size * 0.24;
+      // warmHex here measures only 2.5-2.94:1 against SOFT across the 4
+      // themes (below the 3:1 non-text minimum) — already investigated on
+      // 2026-07-21 (rendered and visually inspected, not just computed):
+      // even the worst case (blended, 2.50:1) reads as a clearly
+      // distinguishable solid blob. Left as-is deliberately; don't re-flag
+      // without new visual evidence, not just the same contrast math.
       ctx.fillStyle = warmHex;
       roundedRectPath(ctx, cx - r * 1.5, cy + r * 0.35, r * 3, size * 0.42, r * 0.9);
       ctx.fill();
@@ -263,6 +269,18 @@
       // label) should still draw one silhouette, not silently jump to 2 —
       // `|| 2` here previously treated a real 0 the same as "not provided".
       const parentCount = Math.max(1, Math.min(opts.parentCount || 0, 2));
+      // Intentionally a boolean, not a real count: this simplified scene
+      // draws at most ONE sibling silhouette as a stand-in for "there are
+      // siblings", the same way it draws at most two parent silhouettes
+      // regardless of a longer custom parents label — it's a symbolic
+      // family portrait, not a literal head count. The page's own prose
+      // (buildPages() in app.js) already names every sibling by name; this
+      // has been independently investigated and confirmed intentional at
+      // least 3 times (2026-07-10, 2026-07-16, 2026-07-17) after looking
+      // like a bug on first read — if you're about to "fix" this to loop
+      // over the real sibling count, don't; that would need real layout
+      // work (spacing N silhouettes without overlap) that's out of scope
+      // for a one-line change.
       const siblingCount = opts.siblingCount ? 1 : 0;
       const positions = parentCount === 2 ? [-1, 1] : [-1];
       // With 2 parents, the parent-child-parent triptych is already centered
@@ -294,7 +312,11 @@
       // 0.28 (not 0.24) leaves room for the widest hair styles (long/pigtails,
       // ~1.35x the face radius) so hair never overlaps the parent silhouettes.
       positions.forEach((side) => drawPersonSilhouette(ctx, faceCx + side * size * 0.28, groundY, 1, warmDarkHex, size));
-      if (siblingCount) drawPersonSilhouette(ctx, cx + size * (parentCount === 2 ? 0.42 : 0.3), groundY, 0.62, warmHex, size);
+      // warmHex here (unstroked fill vs the SOFT card) measured only
+      // 2.5-2.94:1 across the 4 themes, below the 3:1 non-text minimum —
+      // the same bug class the parent silhouettes just above already avoid
+      // by using warmDarkHex instead. Matched here for the sibling figure too.
+      if (siblingCount) drawPersonSilhouette(ctx, cx + size * (parentCount === 2 ? 0.42 : 0.3), groundY, 0.62, warmDarkHex, size);
       drawFace(ctx, faceCx, groundY - size * 0.17, size * 0.15, avatar);
       return canvas.toDataURL('image/png');
     }

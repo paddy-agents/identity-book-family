@@ -88,6 +88,19 @@
         e.preventDefault();
       }
     });
+    // #save-error already tells a parent in words to finish in one sitting or
+    // download before closing the tab (v1.14.1) — but nothing stopped the tab
+    // from actually closing. Add the browser's own native "leave site?"
+    // prompt as a last line of defense for exactly the moment that banner is
+    // already warning about (autosave failing, e.g. private browsing or a
+    // full quota), instead of relying solely on a banner a parent might not
+    // notice before closing the tab.
+    window.addEventListener('beforeunload', (e) => {
+      if (els.saveError && !els.saveError.hidden) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
 
     restoreSavedProgress();
     renderPreview();
@@ -601,7 +614,16 @@
       // names out of adjacent spreadsheet cells). jsPDF renders a raw tab
       // as a large blank gap rather than a space, so normalize any control
       // character to a plain space before it reaches state.
-      state.answers[f.id] = input.value.replace(/[\x00-\x1f\x7f]/g, ' ');
+      // .normalize('NFC') collapses a decomposed accented character (base
+      // letter + separate combining mark, e.g. "i" + U+0301 — a real paste
+      // artifact from some clipboard/IME sources) into its precomposed form
+      // ("í", U+00ED). Precomposed Latin-1 accents are within jsPDF's
+      // standard-font support and render correctly; the decomposed form's
+      // combining mark alone is not, so without this a name that LOOKS
+      // identical in the preview would render broken in the PDF and trip
+      // collectUnsupportedGlyphs()'s warning for no reason a parent could
+      // see or fix.
+      state.answers[f.id] = input.value.replace(/[\x00-\x1f\x7f]/g, ' ').normalize('NFC');
       // numSiblings/parentsLabel/adoptionPath changes may add/remove dependent fields.
       if (f.id === 'numSiblings' || f.id === 'parentsLabel' || f.id === 'adoptionPath') {
         renderFields();
@@ -658,13 +680,28 @@
   // did you get help" phrase) get spliced mid-sentence rather than shown as
   // their own standalone page — a trailing period a parent naturally typed
   // ("Biscuit.", "2 weeks.") then produced a doubled/misplaced period, e.g.
-  // "a pet named Biscuit.." or "— 2 weeks. of waiting and love". Only strips
-  // from the END of the string, so it's safe to apply even to values that
-  // happen to already read fine (nothing to strip). Fields that ARE shown as
-  // their own complete sentence (joyfulDetail, promise, signOff) intentionally
-  // keep whatever punctuation the parent wrote.
+  // "a pet named Biscuit.." or "— 2 weeks. of waiting and love". Also strips
+  // a trailing Unicode ellipsis ("…", U+2026) — a real terminal-punctuation
+  // character this product's own copy already treats as supported (see
+  // WINANSI_EXTRA below), so a parent typing "2 weeks…" hit the exact same
+  // "a pet named Buddy…." glued-punctuation bug the ASCII case was fixed
+  // for. Only strips from the END of the string, so it's safe to apply even
+  // to values that happen to already read fine (nothing to strip). Fields
+  // that ARE shown as their own complete sentence (joyfulDetail, promise,
+  // signOff) intentionally keep whatever punctuation the parent wrote.
+  //
+  // Also strips any whitespace immediately before the punctuation (e.g.
+  // "Maya ." or "Biscuit ."), not just the punctuation itself — every call
+  // site does stripTrailingPunctuation(x.trim()), and trim() only removes
+  // whitespace at the very edges, so a space *before* a trailing period
+  // survives trim() untouched. That leftover space is invisible in the
+  // live preview (plain HTML text flow collapses runs of whitespace) but
+  // renders literally in the PDF (jsPDF's doc.text() does not collapse
+  // whitespace) — "Maya , ready for the world." / "held Maya ." — the
+  // exact "looks right in preview, wrong in the real PDF" failure mode
+  // found live via a fresh-eyes review 2026-07-22.
   function stripTrailingPunctuation(str) {
-    return str.replace(/[.!?,;]+$/, '');
+    return str.replace(/\s*[.!?,;…]+$/, '');
   }
 
   function joinWithAnd(items) {
@@ -692,7 +729,7 @@
     return raw
       .replace(/\band\b/gi, ',')
       .split(/[,&;/]+/)
-      .map((s) => s.trim())
+      .map((s) => stripTrailingPunctuation(s.trim()))
       .filter(Boolean);
   }
 
@@ -700,7 +737,8 @@
     const n = clampSiblingCount(a.numSiblings || '0');
     const names = [];
     for (let i = 1; i <= n; i++) {
-      if (a['siblingName' + i] && a['siblingName' + i].trim()) names.push(a['siblingName' + i].trim());
+      if (a['siblingName' + i] && a['siblingName' + i].trim())
+        names.push(stripTrailingPunctuation(a['siblingName' + i].trim()));
     }
     return names;
   }
@@ -716,7 +754,7 @@
     // ("you was...", "you's family"), visible in the live preview to every
     // new user before they've typed a name (childName is required, so this
     // never reaches an actual downloaded PDF).
-    const name = a.childName && a.childName.trim() ? a.childName.trim() : 'your child';
+    const name = a.childName && a.childName.trim() ? stripTrailingPunctuation(a.childName.trim()) : 'your child';
     const title = a.bookTitle && a.bookTitle.trim() ? a.bookTitle.trim() : st.defaultTitle;
     const season = a.season || 'spring';
     const parents = getParentsList(a);
@@ -764,6 +802,29 @@
       pages.push({ kind: 'text', label: 'A joyful detail', text: a.joyfulDetail.trim(), motif: 'sparkle' });
     }
 
+    // Kinship adoption's own origin sentence (buildOriginSentence) is built on
+    // an "already loved [name]" premise — a pre-existing relationship, not a
+    // first meeting — so "the very first time they held [name]" directly
+    // contradicted it on every single Kinship-adoption book, with no optional
+    // fields required to trigger it (unlike the travel-page instance of this
+    // same contradiction class, fixed below for Kinship/International/Foster
+    // care). Blended family has the same problem for a different reason: its
+    // own premise (buildOriginSentence's blended branch, and the "met, fell
+    // in love, and became one family" framing prompts.js invites) is two
+    // already-existing families merging as the child grows, not a newborn/
+    // first-meeting scene — "the very first time they held [name]" reads as
+    // an infancy moment that doesn't fit, on every single blended-family
+    // book. Foster care is the third case: its own origin sentence ("opened
+    // their hearts and their home") is deliberately non-committal about
+    // timing because a foster-to-adopt family may have already had the child
+    // living with them — often for months or years — well before this "held
+    // for the first time" page, which many real foster-adoptive families
+    // would read as simply untrue. Computed here (before the travel page
+    // below) since all three paths need it there too.
+    const isKinshipAdoption = state.storyType === 'adoption' && a.adoptionPath === 'Kinship / relative adoption';
+    const isBlended = state.storyType === 'blended';
+    const isFosterCare = state.storyType === 'adoption' && a.adoptionPath === 'Foster care';
+
     // travelPlace/travelDuration only exist in the adoption & surrogacy forms.
     // Switching story types doesn't clear state.answers (so shared fields like
     // childName carry over), so a stale value from a previously-selected type
@@ -777,21 +838,41 @@
       // Kinship AND International adoption's own origin sentences are both
       // built on an "already brought/home" premise (see buildOriginSentence),
       // not "met for the first time" — so "to meet [name]" here would
-      // directly contradict the page right before it for either path. This
-      // used to only check Kinship even though the comment already noted
-      // International's origin sentence used the same "bring home" framing —
-      // a real, reachable bug since travelPlace/travelDuration are exactly
-      // the fields the international-adoption path's own form invites a
-      // parent to fill in.
-      const bringsHome = state.storyType === 'adoption' &&
-        (a.adoptionPath === 'Kinship / relative adoption' || a.adoptionPath === 'International adoption');
-      text += bringsHome ? ' to bring ' + name + ' home.' : ' to meet ' + name + '.';
+      // directly contradict the page right before it for either path. Foster
+      // care needs its own third phrase, not either of the other two: unlike
+      // Kinship/International, a foster-care trip isn't necessarily "bringing
+      // [name] home" for the first time either (it could be a drive to a
+      // finalization hearing long after the child already moved in) — so it
+      // gets the same neutral, timing-agnostic treatment as its "held" page
+      // below, true whether this was a first meeting or not. This used to
+      // only check Kinship, then Kinship+International, even though
+      // travelPlace/travelDuration are unconditional fields on the whole
+      // adoption form (no showIf in prompts.js) reachable from every path,
+      // including Foster care — a real, reachable bug found by a fresh-eyes
+      // review 2026-07-22.
+      let closing;
+      if (isFosterCare) closing = ' to be with ' + name + '.';
+      else if (state.storyType === 'adoption' &&
+        (a.adoptionPath === 'Kinship / relative adoption' || a.adoptionPath === 'International adoption'))
+        closing = ' to bring ' + name + ' home.';
+      else closing = ' to meet ' + name + '.';
+      text += closing;
       pages.push({ kind: 'text', label: 'The journey', text: text, motif: 'plane' });
     }
 
+    let heldText;
+    if (isKinshipAdoption) {
+      heldText = parentsPhrase + ' could hardly believe how blessed they were to finally make it official and call ' + name + ' their own.';
+    } else if (isBlended) {
+      heldText = parentsPhrase + ' could hardly believe how blessed they were the day they all finally became one family.';
+    } else if (isFosterCare) {
+      heldText = parentsPhrase + ' could hardly believe how blessed they were the day they knew ' + name + ' would always be their own.';
+    } else {
+      heldText = parentsPhrase + ' could hardly believe how blessed they were the very first time they held ' + name + '.';
+    }
     pages.push({
       kind: 'text',
-      text: parentsPhrase + ' could hardly believe how blessed they were the very first time they held ' + name + '.',
+      text: heldText,
       motif: 'heart',
     });
 
@@ -961,8 +1042,13 @@
     const badChars = collectUnsupportedGlyphs(pages);
     if (badChars.length) {
       els.charsetWarning.hidden = false;
+      // Each flagged character can itself be an RTL script (e.g. Arabic,
+      // Hebrew) mixed into this LTR sentence, with LTR quote marks/commas on
+      // either side — the same bidi-reordering problem already fixed for
+      // .page-label-inline, just missed for this banner: without isolate
+      // marks the quoted list visually reorders into an unreadable jumble.
       els.charsetWarning.textContent = 'Heads up: the downloadable PDF can only display Latin/European ' +
-        'letters right now, so ' + badChars.map((c) => '"' + c + '"').join(', ') +
+        'letters right now, so ' + badChars.map((c) => '"' + isolateRtlForDisplay(c) + '"').join(', ') +
         ' will come out as garbled symbols in your download, even though it looks right here in the preview. ' +
         "We're sorry about that — wider language support is on our list.";
     } else {
