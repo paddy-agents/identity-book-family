@@ -27,6 +27,18 @@
   // dialog-free race against a fast story-type-card click).
   let isGeneratingPdf = false;
 
+  // Counts photo uploads currently being read/cropped (both async) across all
+  // photo fields. cropPhotoToSquare() can take a real stretch on a large photo
+  // (measured ~280ms for a 6000x4000 JPEG) — clicking Download inside that
+  // window used to silently build the book from whatever was in
+  // state.answers.childPhoto BEFORE the upload finished (nothing, on a first
+  // upload), producing a keepsake with the generic avatar instead of the
+  // photo the parent had just picked, with no error or indication anything
+  // was skipped. Gating the Download button (and the click handler itself,
+  // in case Enter/a fast click lands before the button re-disables) on this
+  // count closes that window.
+  let pendingPhotoUploads = 0;
+
   const els = {};
 
 
@@ -116,7 +128,16 @@
     if (!saved || !saved.storyType) return;
 
     state.storyType = saved.storyType;
-    state.answers = saved.answers || {};
+    // Guard against corrupted/hand-edited localStorage the same way the
+    // previewIndex/numSiblings/select-field guards below already do: a
+    // non-object `answers` (e.g. a string or number, which `|| {}` alone
+    // would NOT catch since those can be truthy) would otherwise become
+    // state.answers itself — every later `state.answers[f.id] = value`
+    // write then silently no-ops (property assignment on a primitive is a
+    // no-op in non-strict mode), so the whole form would render as if every
+    // field were blank with no visible error at all.
+    state.answers =
+      saved.answers && typeof saved.answers === 'object' && !Array.isArray(saved.answers) ? saved.answers : {};
     state.titleTouched = !!saved.titleTouched;
     // Guard against corrupted/hand-edited localStorage: a non-numeric value
     // (e.g. 'x') coerces to NaN, and NaN fails every numeric comparison in
@@ -154,6 +175,15 @@
     }
     if (els.savedNote) els.savedNote.hidden = !didSave;
     if (els.saveError) els.saveError.hidden = didSave;
+    // A successful save here just overwrote whatever another tab wrote —
+    // the warning's "your changes will be overwritten" framing is now
+    // backwards (this tab's own changes are what's saved), and since
+    // saveProgress() runs on every keystroke with no debounce, leaving it up
+    // would make it permanently stuck and increasingly wrong the moment a
+    // parent does the single most likely thing after seeing it: keeps
+    // typing. Only clear it on a successful save — if the save itself
+    // failed, the other tab's data is untouched and the warning still holds.
+    if (didSave && els.tabConflictWarning) els.tabConflictWarning.hidden = true;
   }
 
   function startOver() {
@@ -248,11 +278,31 @@
   // showIf-conditional fields (e.g. parentsLabelCustom).
   function getVisibleFields() {
     const fields = getFieldsFor(state.storyType);
+    // Normalize any select-type answer that no longer matches its own
+    // field's option list (corrupted/hand-edited localStorage, or a future
+    // option-list change) BEFORE evaluating any showIf() below — otherwise a
+    // stale/invalid value (e.g. adoptionPath: 'unknown-path') can wrongly
+    // hide or show a conditional field (birthParentTerm's showIf reads the
+    // raw value here), even though the value itself would be silently
+    // corrected moments later when its own <select> is actually rendered.
+    // numSiblings is excluded: it has its own clamp-to-nearest-bound logic
+    // right below (e.g. '99' clamps to '4', the max — not reset to '0',
+    // the default — since siblings already named shouldn't be discarded).
+    fields.forEach((f) => {
+      if (f.type === 'select' && f.id !== 'numSiblings' && !f.options.includes(state.answers[f.id])) {
+        state.answers[f.id] = f.default || f.options[0];
+      }
+    });
     const out = [];
     fields.forEach((f) => {
       if (f.id === 'numSiblings') {
         out.push(f);
         const n = clampSiblingCount(state.answers.numSiblings || f.default || '0');
+        // Keep the <select>'s own stored value in sync with the clamp below —
+        // otherwise a corrupted/out-of-range saved value (e.g. '7') still gets
+        // written verbatim into the <select> (selectedIndex -1, blank display)
+        // even though the sibling-name fields it generates are correctly capped.
+        state.answers.numSiblings = String(n);
         for (let i = 1; i <= n; i++) out.push(siblingField(i));
         return;
       }
@@ -333,9 +383,17 @@
         return;
       }
 
-      const value = state.answers[f.id] !== undefined ? state.answers[f.id] : (f.default || '');
+      let value = state.answers[f.id] !== undefined ? state.answers[f.id] : (f.default || '');
       let input;
       if (f.type === 'select') {
+        // A saved value that doesn't match any of this field's own options
+        // (hand-edited/corrupted localStorage, or a future option-list
+        // change) would otherwise assign the <select>'s .value to something
+        // it has no matching <option> for, silently rendering it blank
+        // (selectedIndex -1) — no visible selection, and downstream code
+        // that branches on this exact string can also fall through to an
+        // unintended default. Fall back to the field's own default instead.
+        if (!f.options.includes(value)) value = f.default || f.options[0];
         input = document.createElement('select');
         f.options.forEach((opt) => {
           const o = document.createElement('option');
@@ -357,6 +415,16 @@
       input.id = 'field-' + f.id;
       input.value = value;
       if (hintId) input.setAttribute('aria-describedby', hintId);
+      // The only signal a field is mandatory used to be that its label omits
+      // "(optional)" — a screen-reader user tabbing directly into a field
+      // (rather than reading the label text first) got no indication of
+      // that. There's no <form> element anywhere in this app (every action
+      // is a plain button click), so the native `required` attribute has no
+      // side effect here beyond the accessibility signal it's meant for.
+      if (f.required) {
+        input.required = true;
+        input.setAttribute('aria-required', 'true');
+      }
       state.answers[f.id] = value;
 
       // A single 'input' listener is enough — <select> fires both 'input' and
@@ -421,20 +489,26 @@
       if (!file) return;
       errorMsg.hidden = true;
       const mySeq = (photoUploadSeq[f.id] = (photoUploadSeq[f.id] || 0) + 1);
+      // Disable Download for the duration of this crop — see
+      // pendingPhotoUploads' own comment for why.
+      pendingPhotoUploads++;
+      renderPreview();
       cropPhotoToSquare(
         file,
         (dataUrl) => {
+          pendingPhotoUploads--;
           // A newer upload for this same field started (and possibly
           // already finished) while this one was still processing —
           // discard this stale result instead of clobbering it.
-          if (photoUploadSeq[f.id] !== mySeq) return;
+          if (photoUploadSeq[f.id] !== mySeq) { renderPreview(); return; }
           state.answers[f.id] = dataUrl;
           renderFields();
           renderPreview();
           saveProgress();
         },
         () => {
-          if (photoUploadSeq[f.id] !== mySeq) return;
+          pendingPhotoUploads--;
+          if (photoUploadSeq[f.id] !== mySeq) { renderPreview(); return; }
           // Look these up fresh by id instead of trusting the fileInput/
           // errorMsg closures — an unrelated field change (numSiblings/
           // parentsLabel/adoptionPath) can trigger a renderFields() DOM
@@ -445,6 +519,7 @@
           const liveError = document.getElementById('field-' + f.id + '-error');
           if (liveInput) liveInput.value = '';
           if (liveError) liveError.hidden = false;
+          renderPreview();
         }
       );
     });
@@ -495,6 +570,12 @@
         const side = Math.min(img.width, img.height);
         const sx = (img.width - side) / 2;
         const sy = (img.height - side) / 2;
+        // JPEG output has no alpha channel — without an explicit opaque
+        // background, transparent areas of a source PNG/GIF/WebP (e.g. a
+        // sticker or a screenshot) get flattened to solid black instead of
+        // reading as "no photo there," in both the live preview and the PDF.
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, size, size);
         ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
         onDone(canvas.toDataURL('image/jpeg', 0.82));
       };
@@ -737,8 +818,16 @@
     const n = clampSiblingCount(a.numSiblings || '0');
     const names = [];
     for (let i = 1; i <= n; i++) {
-      if (a['siblingName' + i] && a['siblingName' + i].trim())
-        names.push(stripTrailingPunctuation(a['siblingName' + i].trim()));
+      const raw = a['siblingName' + i];
+      if (!raw || !raw.trim()) continue;
+      // A value made up entirely of punctuation (e.g. "...") is non-blank
+      // text but strips down to nothing once stripTrailingPunctuation()
+      // runs — without this filter an empty string still gets pushed,
+      // producing a phantom "a " family member and stray commas/spaces on
+      // several pages. Same failure shape already fixed for childName and
+      // guarded against in getParentsList() via .filter(Boolean).
+      const stripped = stripTrailingPunctuation(raw.trim());
+      if (stripped) names.push(stripped);
     }
     return names;
   }
@@ -754,7 +843,14 @@
     // ("you was...", "you's family"), visible in the live preview to every
     // new user before they've typed a name (childName is required, so this
     // never reaches an actual downloaded PDF).
-    const name = a.childName && a.childName.trim() ? stripTrailingPunctuation(a.childName.trim()) : 'your child';
+    // Strip first, THEN check for blankness — a value that's entirely
+    // punctuation (e.g. "...") is non-blank before stripping but empty
+    // after, and checking the pre-strip value alone let it slip through
+    // as a literal blank name in the rendered book (see the matching
+    // allRequiredFilled() guard above, which normally blocks this at
+    // input time; this is the defense-in-depth fallback for corrupted
+    // saved state that bypasses that check).
+    const name = (a.childName && stripTrailingPunctuation(a.childName.trim())) || 'your child';
     const title = a.bookTitle && a.bookTitle.trim() ? a.bookTitle.trim() : st.defaultTitle;
     const season = a.season || 'spring';
     const parents = getParentsList(a);
@@ -788,7 +884,19 @@
     pages.push({
       kind: 'text',
       label: 'Once upon a time…',
-      text: 'Once upon a ' + season + '-time, there was ' + (joinWithAnd(members) || 'a family') + '.',
+      // "there was"/"there were" must agree with how many members end up
+      // joined — the default parents label alone is 2 entries ("Mommy and
+      // Daddy"), so this is reachable via the single most common
+      // configuration, not an edge case: "there was a Mommy and a Daddy"
+      // is a subject-verb mismatch. Found by a fresh-eyes review 2026-07-23.
+      text:
+        'Once upon a ' +
+        season +
+        '-time, there ' +
+        (members.length <= 1 ? 'was' : 'were') +
+        ' ' +
+        (joinWithAnd(members) || 'a family') +
+        '.',
       motif: 'moon-stars',
     });
 
@@ -830,11 +938,19 @@
     // childName carry over), so a stale value from a previously-selected type
     // must not leak into a type whose form can't even show/clear it.
     const hasTravelField = getFieldsFor(state.storyType).some((f) => f.id === 'travelPlace');
-    if (hasTravelField && ((a.travelPlace && a.travelPlace.trim()) || (a.travelDuration && a.travelDuration.trim()))) {
+    // Compute the STRIPPED values up front and gate on those, not the
+    // pre-strip .trim() truthiness — a punctuation-only value (e.g. "...")
+    // is non-blank pre-strip but reduces to "" after
+    // stripTrailingPunctuation(), which used to still get spliced in as-is
+    // ("traveled to  to meet Alex.", dangling "to"/double space). Same
+    // failure shape already fixed for childName/siblingName/helperDetail/
+    // howCame; found by a fresh-eyes review 2026-07-23.
+    const place = a.travelPlace ? stripTrailingPunctuation(a.travelPlace.trim()) : '';
+    const duration = a.travelDuration ? stripTrailingPunctuation(a.travelDuration.trim()) : '';
+    if (hasTravelField && (place || duration)) {
       let text = parentsPhrase + ' traveled';
-      if (a.travelPlace && a.travelPlace.trim()) text += ' to ' + stripTrailingPunctuation(a.travelPlace.trim());
-      if (a.travelDuration && a.travelDuration.trim())
-        text += ' — ' + stripTrailingPunctuation(a.travelDuration.trim()) + ' of waiting and love';
+      if (place) text += ' to ' + place;
+      if (duration) text += ' — ' + duration + ' of waiting and love';
       // Kinship AND International adoption's own origin sentences are both
       // built on an "already brought/home" premise (see buildOriginSentence),
       // not "met for the first time" — so "to meet [name]" here would
@@ -884,7 +1000,22 @@
       });
     }
 
-    pages.push({ kind: 'text', text: 'Then, everyone headed home, eager to share their happy news with the whole family!', motif: 'house' });
+    // "Headed home" reads as a first-time homecoming — true for International
+    // adoption (the journey page above already established a real trip home)
+    // and the default paths, but contradicts Kinship (often already living
+    // together) and Foster care (may have been living together for months or
+    // years) the same way the neighboring "held"/"journey" pages already
+    // guard against for those two paths. Found by a fresh-eyes review
+    // 2026-07-23, the 7th instance of this same contradiction class.
+    let headedHomeText;
+    if (isKinshipAdoption) {
+      headedHomeText = 'And from that day on, it was official — ' + name + ' had always been family, and now everyone knew it for certain.';
+    } else if (isFosterCare) {
+      headedHomeText = 'And from that day forward, they just kept right on being family — official now, and forever.';
+    } else {
+      headedHomeText = 'Then, everyone headed home, eager to share their happy news with the whole family!';
+    }
+    pages.push({ kind: 'text', text: headedHomeText, motif: 'house' });
 
     pages.push({
       kind: 'family-portrait',
@@ -916,10 +1047,14 @@
       return 'A ' + helper + ' carried ' + name + ' and kept ' + name + ' safe until it was time to meet ' + parentsPhrase + '.';
     }
     if (storyTypeId === 'ivf') {
-      const detail =
-        a.helperDetail && a.helperDetail.trim()
-          ? stripTrailingPunctuation(a.helperDetail.trim())
-          : 'a little help from science';
+      // A value made up entirely of punctuation (e.g. "...") is non-blank
+      // pre-strip but reduces to "" after stripTrailingPunctuation() — the
+      // old ternary only checked the pre-strip value, so it used the empty
+      // string as-is instead of falling back to the default, producing
+      // "...wanted Maya so much — , and then...". Same failure shape
+      // already fixed for childName/siblingName; the `||` re-checks the
+      // actual value that gets used.
+      const detail = (a.helperDetail && stripTrailingPunctuation(a.helperDetail.trim())) || 'a little help from science';
       // Donor conception is a true, distinct part of some families' stories —
       // named plainly here rather than folded silently into this detail
       // (see docs/family-language-review.md).
@@ -932,10 +1067,8 @@
       return parentsPhrase + ' wanted ' + name + ' so much — ' + detail + ', and then, there ' + name + ' was!';
     }
     if (storyTypeId === 'blended') {
-      const how =
-        a.howCame && a.howCame.trim()
-          ? stripTrailingPunctuation(a.howCame.trim())
-          : 'met, fell in love, and became one family';
+      // Same fallback fix as helperDetail above.
+      const how = (a.howCame && stripTrailingPunctuation(a.howCame.trim())) || 'met, fell in love, and became one family';
       return parentsPhrase + ' ' + how + ', and that is how our family grew.';
     }
     // adoption — the story differs by real path (see docs/adoption-language-review.md):
@@ -1034,10 +1167,8 @@
     els.prevBtn.disabled = state.previewIndex === 0;
     els.nextBtn.disabled = state.previewIndex === pages.length - 1;
 
-    els.downloadBtn.disabled = !state.storyType || !allRequiredFilled();
-    els.downloadHint.textContent = els.downloadBtn.disabled
-      ? 'Fill in the required prompts above to unlock your download.'
-      : 'Your book is ready.';
+    els.downloadBtn.disabled = !state.storyType || !allRequiredFilled() || pendingPhotoUploads > 0;
+    updateDownloadHint();
 
     const badChars = collectUnsupportedGlyphs(pages);
     if (badChars.length) {
@@ -1125,8 +1256,50 @@
       // parses to zero actual names — that would leave the family-portrait
       // scene silently drawing generic silhouettes with nothing to back them.
       if (f.id === 'parentsLabelCustom') return getParentsList(state.answers).length > 0;
+      // Same failure shape for the child's own name: a value made up
+      // entirely of punctuation (e.g. "...") is non-blank text but strips
+      // down to nothing once stripTrailingPunctuation() runs on it in
+      // buildPages() — that produced a downloadable PDF with the name
+      // silently blank everywhere ("A story for ", "  was already loved
+      // by..."). Found live 2026-07-23.
+      if (f.id === 'childName') return !!stripTrailingPunctuation(value.trim());
+      // Same failure shape for sibling names: punctuation-only text passes
+      // the generic non-blank check above but strips to nothing.
+      if (f.id.startsWith('siblingName')) return !!stripTrailingPunctuation(value.trim());
+      // Same failure shape for IVF's/blended's short free-text phrase
+      // fields — buildOriginSentence() now falls back to a sensible
+      // default when the stripped value is empty (rather than splicing in
+      // ""), but a punctuation-only value should still read as unfilled
+      // here so the parent gets a clear signal instead of their input
+      // being silently swapped for boilerplate.
+      if (f.id === 'helperDetail' || f.id === 'howCame') return !!stripTrailingPunctuation(value.trim());
       return true;
     });
+  }
+
+  // Both renderPreview() (on every keystroke) and downloadBook()'s finally
+  // block used to set #download-hint to "Your book is ready." purely from
+  // els.downloadBtn.disabled, with no regard for whether #download-error
+  // (role="alert") was currently showing a failed-download message right
+  // below it — so a parent whose PDF generation failed (e.g. the jsPDF CDN
+  // blocked/offline) saw a role="status" region insist the book was ready
+  // while the role="alert" region right next to it said it couldn't be
+  // created, and every subsequent keystroke re-confirmed the false "ready"
+  // hint without ever resolving the contradiction. Found by a fresh-eyes
+  // review 2026-07-23. Centralizing the hint update here means both call
+  // sites automatically respect the error banner's current state.
+  function updateDownloadHint() {
+    if (els.downloadError && !els.downloadError.hidden) {
+      els.downloadHint.textContent = '';
+      return;
+    }
+    if (pendingPhotoUploads > 0) {
+      els.downloadHint.textContent = "Still processing your photo — just a moment.";
+      return;
+    }
+    els.downloadHint.textContent = els.downloadBtn.disabled
+      ? 'Fill in the required prompts above to unlock your download.'
+      : 'Your book is ready.';
   }
 
   function movePreview(delta) {
@@ -1169,6 +1342,11 @@
     // the first click of a cluster without affecting genuinely separate
     // single clicks (e.g. a retry after fixing a download error).
     if (evt && evt.detail > 1) return;
+    // The button disables itself the moment a photo upload starts (see
+    // pendingPhotoUploads), but guard the handler too in case a fast click or
+    // Enter keypress lands in the same tick the upload begins, before the
+    // disabled state has painted.
+    if (pendingPhotoUploads > 0) return;
     els.downloadError.hidden = true;
     // buildAndSaveDoc() draws every page synchronously and can block the main
     // thread for a noticeable stretch on a heavy book (several avatar scenes
@@ -1197,10 +1375,8 @@
         } finally {
           isGeneratingPdf = false;
           els.downloadBtn.textContent = originalLabel;
-          els.downloadBtn.disabled = !state.storyType || !allRequiredFilled();
-          els.downloadHint.textContent = els.downloadBtn.disabled
-            ? 'Fill in the required prompts above to unlock your download.'
-            : 'Your book is ready.';
+          els.downloadBtn.disabled = !state.storyType || !allRequiredFilled() || pendingPhotoUploads > 0;
+          updateDownloadHint();
         }
       });
     });

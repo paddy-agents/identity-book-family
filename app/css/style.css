@@ -1,4 +1,9 @@
 :root {
+  /* The page is a fixed light theme with no dark variant; without this,
+     some browsers render native controls (<select>, the file-input button)
+     in dark UA chrome under a dark OS setting, clashing with the cream
+     page (found 2026-07-22). */
+  color-scheme: light;
   --cream: #fbf6ef;
   --ink: #33291f;
   --warm: #c9713a;
@@ -129,8 +134,16 @@ h1.hero {
 
 .link-btn:hover { filter: brightness(0.8); }
 
+/* Neither .btn's white text (for the plain Download button, disabled by
+   default until required fields are filled) nor .btn.secondary's themed
+   --warm-dark text (for the Prev/Next buttons, disabled at the first/last
+   preview page) stay readable against this tan disabled background —
+   white measures ~1.82:1, --warm-dark 2.78-4.00:1 depending on theme, all
+   below 4.5:1 (found live 2026-07-22). --ink is a constant across every
+   theme and clears 7.83:1 here, so one override fixes both button variants. */
 .btn:disabled {
   background: #cbbfa9;
+  color: var(--ink);
   cursor: not-allowed;
 }
 
@@ -392,16 +405,30 @@ footer.site {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  border: 2px solid var(--line);
+  /* Unlike other bordered controls, this circle's own fill IS the choice it
+     represents (skin/hair/eye tone) — the themed --line token is deliberately
+     subtle everywhere else because the element's content already conveys the
+     information, but here that same subtlety made the two lightest skin
+     tones ('light'/'fair') render as edge-less, barely-visible blobs (as low
+     as ~1.0:1 border-vs-fill contrast in every theme). --ink is fixed
+     (doesn't vary per theme) and clears >=3:1 against every skin/hair/eye
+     swatch color except 'deep' skin, whose fill already contrasts ~6.9:1
+     against the page on its own. */
+  border: 2px solid var(--ink);
   padding: 0;
   cursor: pointer;
 }
 
-.swatch:hover { border-color: var(--warm); }
+/* Signal hover/selected via box-shadow only, never border-color — the
+   border is fixed to --ink specifically because it's the only color proven
+   to clear 3:1 against every swatch fill (see the comment above); swapping
+   it to --warm/--warm-dark on hover/selected silently undid that fix for
+   9 of 12 fills (as low as ~1.0:1), most visibly on the medium/brown/brown
+   DEFAULT_AVATAR combo that's already selected on first paint. */
+.swatch:hover { box-shadow: 0 0 0 2px var(--warm); }
 
 .swatch.selected {
-  border-color: var(--warm-dark);
-  box-shadow: 0 0 0 2px var(--soft);
+  box-shadow: 0 0 0 2px var(--warm-dark), 0 0 0 4px var(--soft);
 }
 
 .style-btn {

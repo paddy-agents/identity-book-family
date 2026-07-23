@@ -68,6 +68,12 @@
   }
 
   function roundedRectPath(ctx, x, y, w, h, radius) {
+    // Unlike native ctx.roundRect(), arcTo() has no built-in clamp — a
+    // radius bigger than half the rect's own width/height (e.g. the baby
+    // scene's swaddle: r*0.9 vs a height of size*0.42) makes the two arcs
+    // sharing that edge overshoot past each other, producing a small kink
+    // instead of a smooth curve, on every render regardless of avatar config.
+    radius = Math.min(radius, w / 2, h / 2);
     ctx.beginPath();
     ctx.moveTo(x + radius, y);
     ctx.arcTo(x + w, y, x + w, y + h, radius);
@@ -139,23 +145,31 @@
     ctx.strokeStyle = '#4a3626';
     ctx.lineWidth = Math.max(1, r * 0.025);
 
+    // Head is drawn BEFORE the ears, not after: the ear circles straddle the
+    // head circle's own boundary (ear spans ~0.82r-1.14r from center, the
+    // head's stroke sits at exactly r), so drawing the head second painted
+    // its boundary stroke straight across each ear, splitting it into two
+    // crescents with a stray line down the middle (found 2026-07-22 by
+    // actually rendering and zooming into the ear). Ears now drawn last so
+    // their own fill+stroke correctly paints over that line, the same way a
+    // real ear sits in front of (not behind) the side of a head.
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = skin;
+    ctx.fill();
+    ctx.stroke();
+
     ctx.fillStyle = skin;
     [-1, 1].forEach((side) => {
       ctx.beginPath();
       ctx.arc(cx + side * r * 0.98, cy + r * 0.05, r * 0.16, 0, Math.PI * 2);
       ctx.fill();
       // The ear pokes out past the main head circle's own stroked boundary
-      // (below) — without its own stroke, that exposed sliver was the same
+      // (above) — without its own stroke, that exposed sliver was the same
       // near-invisible unstroked skin-on-background patch the fix above
       // solves for the head, just missed for this smaller shape.
       ctx.stroke();
     });
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = skin;
-    ctx.fill();
-    ctx.stroke();
 
     // Blush is drawn BEFORE hair, not after: the 'long' hairstyle's side
     // strands (drawHair) geometrically reach down into this same cheek
@@ -188,11 +202,31 @@
       ctx.arc(ex, ey, r * 0.035, 0, Math.PI * 2);
       ctx.fillStyle = '#241c16';
       ctx.fill();
+      // The pupil's fixed dark fill only measures ~1.66:1 contrast against
+      // the 'brown' iris color (both are dark, low-luminance browns) —
+      // rendered and visually confirmed as a near-featureless dark blob with
+      // no visible pupil/iris boundary, unlike blue/green/hazel (3.7-4.3:1
+      // against the same pupil color, already fine). Rather than lighten the
+      // iris itself (which would blur 'brown' toward looking like 'hazel')
+      // or special-case one eye color, a thin light ring around every pupil
+      // guarantees a visible boundary regardless of the iris's own
+      // luminance — a no-op visual change for the 3 colors that already had
+      // enough contrast. Found by a fresh-eyes review 2026-07-23.
+      ctx.lineWidth = r * 0.012;
+      ctx.strokeStyle = '#f2e6d3';
+      ctx.stroke();
     });
 
+    // A fixed translucent fill blends toward whatever it sits on, so its
+    // effective on-canvas color never reached usable contrast against ANY
+    // skin tone (worst on 'deep', ~1.26:1) — including the default avatar's
+    // own 'medium' skin (~1.73:1), not just an edge case. Reuses the same
+    // per-skin-tone color already used for the mouth stroke (mouthHexFor),
+    // which is already guaranteed >=3:1 against every skin tone. Found by a
+    // fresh-eyes review 2026-07-23.
     ctx.beginPath();
     ctx.arc(cx, cy + r * 0.14, r * 0.035, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(60,40,25,0.35)';
+    ctx.fillStyle = mouthHexFor(avatar.skinTone);
     ctx.fill();
 
     ctx.beginPath();
@@ -297,6 +331,14 @@
       // from the parent silhouettes' fill (warmDarkHex), and stroking the
       // line last used to paint a visibly mismatched-color band straight
       // across their legs where the two overlapped.
+      // warmHex here measures only 2.5-2.94:1 against SOFT across the 4
+      // themes (below the 3:1 non-text minimum) — same tolerated pattern as
+      // the baby-scene swaddle fill above: a decorative illustration line,
+      // not an information-bearing mark (the silhouettes it sits under
+      // already use the higher-contrast warmDarkHex), confirmed visually
+      // distinguishable even at the worst case. Left as-is deliberately;
+      // don't re-flag without new visual evidence, not just the same
+      // contrast math.
       ctx.strokeStyle = warmHex;
       ctx.lineWidth = Math.max(1.5, size * 0.004);
       ctx.beginPath();
