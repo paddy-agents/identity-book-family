@@ -114,6 +114,17 @@
       });
     }
     if (style === 'pigtails') {
+      // A theoretical farthest-point calculation on these constants alone
+      // puts this hairstyle at ~99% of the 'face' scene's circular clip
+      // radius (size*0.5) — the tightest margin of any hairstyle. Checked
+      // empirically anyway (a canvas alpha>10 scan against the clip circle
+      // at size 160/300/625, matching every real render size the 'face'
+      // scene is actually used at) and it comes back with zero stray pixels
+      // at all three — re-confirmed 2026-07-24, same conclusion as
+      // 2026-07-23's and 2026-07-19's earlier checks. Don't re-flag this
+      // from the math alone without a fresh render-and-measure — the
+      // theoretical estimate doesn't match reality here, for reasons not
+      // worth chasing further.
       [-1, 1].forEach((side) => {
         ctx.beginPath();
         ctx.arc(cx + side * r * 1.05, cy + r * 0.25, r * 0.3, 0, Math.PI * 2);
@@ -190,10 +201,23 @@
     [-1, 1].forEach((side) => {
       const ex = cx + side * r * 0.34;
       const ey = cy - r * 0.05;
+      // The white sclera fill alone measures only ~1.3-2.4:1 contrast
+      // against the 3 lightest skin tones ('light', 'fair', and the
+      // default avatar's own 'medium') — same "unstroked fill blends into
+      // an adjacent similar-luminance background" shape already fixed for
+      // the head/ear outlines and the pupil ring, just missed for this
+      // shape. A thin stroke in the same dark color already used for the
+      // head/ear outline clears 3:1 against every skin tone that actually
+      // needs it (the 2 darkest tones already pass on fill alone, so the
+      // stroke there is a no-op, not a fix). Found by a fresh-eyes review
+      // 2026-07-24.
       ctx.beginPath();
       ctx.arc(ex, ey, r * 0.12, 0, Math.PI * 2);
       ctx.fillStyle = '#fff';
       ctx.fill();
+      ctx.lineWidth = Math.max(0.75, r * 0.014);
+      ctx.strokeStyle = '#4a3626';
+      ctx.stroke();
       ctx.beginPath();
       ctx.arc(ex, ey, r * 0.08, 0, Math.PI * 2);
       ctx.fillStyle = eyeColor;

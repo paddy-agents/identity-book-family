@@ -118,8 +118,13 @@ h1.hero {
 /* color switches to --ink (not --warm-dark) on hover: --warm-dark on --soft
    computes to only 3.92:1/4.09:1 in the adoption/blended themes, below the
    4.5:1 AA minimum — --ink clears 9.8-11.0:1 in every theme (see
-   :root/body[data-theme] above). */
-.btn.secondary:hover { background: var(--soft); color: var(--ink); }
+   :root/body[data-theme] above). :not(:disabled) matters here: this
+   selector's specificity (.btn.secondary:hover, 3 classes) otherwise beats
+   .btn:disabled's (2 classes) below regardless of source order, so hovering
+   a disabled Prev/Next button (at the first/last preview page) would paint
+   it with this "active-looking" highlight instead of staying visibly
+   disabled — a real bug found by a fresh-eyes review 2026-07-23. */
+.btn.secondary:hover:not(:disabled) { background: var(--soft); color: var(--ink); }
 
 .link-btn {
   background: none;

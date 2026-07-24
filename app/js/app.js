@@ -69,19 +69,29 @@
     // story silently overwrites that tab's progress on this tab's next save,
     // with no warning to either tab.
     window.addEventListener('storage', (e) => {
-      // Only warn if THIS tab actually has a story of its own that could be
-      // lost — a fresh tab that never picked a story has nothing to
-      // overwrite, so warning it about another tab's changes is a false
-      // alarm that could confuse a parent who just opened the page.
-      if (e.key === STORAGE_KEY && els.tabConflictWarning && state.storyType) {
-        // e.newValue is null when the other tab removed the key (Start Over),
-        // not edited it — "reload to see the changes" would be misleading
-        // there, since reloading actually shows an empty story, not new content.
-        els.tabConflictWarning.textContent = e.newValue === null
-          ? 'This story was cleared in another open tab (Start a new story). If you keep editing here, your changes will still be overwritten by that — reload this tab to start fresh instead.'
-          : 'This story was just changed in another open tab. If you keep editing here, those changes will be overwritten — reload this tab to see them instead.';
-        els.tabConflictWarning.hidden = false;
-      }
+      if (e.key === STORAGE_KEY) checkForStorageConflict(e.oldValue, e.newValue);
+    });
+    // Pages restored from the back-forward cache (bfcache) — e.g. clicking
+    // the header logo to index.html, then hitting Back, a completely
+    // ordinary flow — never receive DOM events, including 'storage', that
+    // fired while frozen, and browsers do not replay them on restore. A
+    // restored tab could therefore miss another tab's edit or "Start a new
+    // story" entirely, with its own next keystroke then silently
+    // overwriting that other tab's save with no warning at all — the exact
+    // data-loss scenario the storage listener above exists to prevent, just
+    // via a path it can't see. Reuse the same conflict check, comparing
+    // this tab's own last-known-saved state (what saveProgress() would
+    // persist right now) against whatever is actually in localStorage after
+    // the restore. Found by a fresh-eyes review 2026-07-24.
+    window.addEventListener('pageshow', (e) => {
+      if (!e.persisted || !state.storyType) return;
+      const ownLastSaved = JSON.stringify({
+        storyType: state.storyType,
+        answers: state.answers,
+        titleTouched: state.titleTouched,
+        previewIndex: state.previewIndex,
+      });
+      checkForStorageConflict(ownLastSaved, localStorage.getItem(STORAGE_KEY));
     });
     // Without this, a photo dropped anywhere on the page except squarely on
     // the small file-upload button falls through to the browser's own
@@ -138,6 +148,17 @@
     // field were blank with no visible error at all.
     state.answers =
       saved.answers && typeof saved.answers === 'object' && !Array.isArray(saved.answers) ? saved.answers : {};
+    // onFieldChange() only sanitizes control characters/decomposed accents
+    // when a field is actively typed into — a value that reached
+    // localStorage some other way (a session saved by an older build before
+    // this sanitizer existed, or hand-edited/corrupted storage, both a
+    // threat model this function already defends against elsewhere) would
+    // otherwise reload unsanitized and carry the same "looks fine on screen,
+    // wrong in the PDF" bug straight through to a download without the
+    // parent ever having typed anything unusual this session.
+    Object.keys(state.answers).forEach((k) => {
+      if (typeof state.answers[k] === 'string') state.answers[k] = sanitizeFieldValue(k, state.answers[k]);
+    });
     state.titleTouched = !!saved.titleTouched;
     // Guard against corrupted/hand-edited localStorage: a non-numeric value
     // (e.g. 'x') coerces to NaN, and NaN fails every numeric comparison in
@@ -145,6 +166,28 @@
     // otherwise sail through as an invalid array index and crash on `.kind`.
     const restoredIndex = parseInt(saved.previewIndex, 10);
     state.previewIndex = Number.isFinite(restoredIndex) && restoredIndex >= 0 ? restoredIndex : 0;
+    // bookTitle has no `default` in prompts.js (only a placeholder) — normal
+    // use always has it populated by selectStoryType()'s own defaulting logic
+    // (never reached on a restore), so a saved answers object missing just
+    // this one key (hand-edited/corrupted storage, same threat model as the
+    // guards above) would otherwise render the title box as blank/unset
+    // instead of showing the real, editable default title text. Found by a
+    // fresh-eyes review 2026-07-24.
+    const restoredStoryType = STORY_TYPES.find((s) => s.id === state.storyType) || STORY_TYPES[0];
+    // Normalize state.storyType itself too, not just the local fallback used
+    // for bookTitle above — every other consumer (buildPages/getFieldsFor/
+    // themeFor/buildOriginSentence) already tolerates an unrecognized id by
+    // falling back to adoption, but the card-highlighting loop and the
+    // data-theme attribute below both do an exact match against the raw
+    // value, so a corrupted/hand-edited storyType left no card selected
+    // (and the theme attribute set to a value no CSS selector matches, only
+    // coincidentally landing on the right colors via :root's own defaults)
+    // even though the form was otherwise fully usable under the same
+    // fallback. Found by a fresh-eyes review 2026-07-24.
+    state.storyType = restoredStoryType.id;
+    if (!state.titleTouched || !state.answers.bookTitle) {
+      state.answers.bookTitle = restoredStoryType.defaultTitle;
+    }
 
     [...els.storyTypes.children].forEach((card) => {
       const isSelected = card.dataset.id === state.storyType;
@@ -155,6 +198,47 @@
     renderFields();
     if (els.savedNote) els.savedNote.hidden = false;
     document.body.dataset.theme = state.storyType;
+  }
+
+  // Shared by the 'storage' listener (fires in other tabs on every write)
+  // and the 'pageshow'/bfcache-restore listener (which has no live event to
+  // read oldValue/newValue from, so it passes its own reconstructed
+  // last-known-saved JSON instead). oldValue/newValue are both raw JSON
+  // strings (or null), matching what a real StorageEvent provides.
+  function checkForStorageConflict(oldValue, newValue) {
+    // Only warn if THIS tab actually has a story of its own that could be
+    // lost — a fresh tab that never picked a story has nothing to
+    // overwrite, so warning it about another tab's changes is a false
+    // alarm that could confuse a parent who just opened the page.
+    if (!els.tabConflictWarning || !state.storyType) return;
+    // saveProgress() persists previewIndex alongside answers on every save,
+    // and movePreview() calls saveProgress() on every Prev/Next click — so
+    // simply browsing pages in the other tab (nothing actually edited)
+    // still fires this check. Ignore a change that's previewIndex-only;
+    // it's not an actual conflict and warning about it is a false alarm,
+    // the same "don't warn when there's nothing at stake" reasoning already
+    // applied above for a fresh tab. Found by a fresh-eyes review 2026-07-23.
+    let onlyPreviewIndexChanged = false;
+    try {
+      const withoutPreviewIndex = (raw) => {
+        if (!raw) return raw;
+        const parsed = JSON.parse(raw);
+        delete parsed.previewIndex;
+        return JSON.stringify(parsed);
+      };
+      onlyPreviewIndexChanged = withoutPreviewIndex(oldValue) === withoutPreviewIndex(newValue);
+    } catch (err) {
+      // Malformed JSON on either side — fall through and warn, same as the
+      // pre-existing behavior.
+    }
+    if (onlyPreviewIndexChanged) return;
+    // newValue is null when the other tab removed the key (Start Over), not
+    // edited it — "reload to see the changes" would be misleading there,
+    // since reloading actually shows an empty story, not new content.
+    els.tabConflictWarning.textContent = newValue === null
+      ? 'This story was cleared in another open tab (Start a new story). If you keep editing here, your changes will still be overwritten by that — reload this tab to start fresh instead.'
+      : 'This story was just changed in another open tab. If you keep editing here, those changes will be overwritten — reload this tab to see them instead.';
+    els.tabConflictWarning.hidden = false;
   }
 
   function saveProgress() {
@@ -407,6 +491,26 @@
         if (f.id === 'bookTitle') {
           const st = STORY_TYPES.find((s) => s.id === state.storyType);
           input.placeholder = (st && st.defaultTitle) || f.placeholder || '';
+        } else if (f.id === 'joyfulDetail' && state.storyType === 'adoption') {
+          // The static placeholder hardcoded "birth mom" regardless of the
+          // dedicated birthParentTerm select right above it — a parent who
+          // picks "birth family"/"birth parents" still saw the one specific
+          // term the app otherwise goes out of its way to make optional
+          // (buildOriginSentence already reads birthParentTerm dynamically
+          // the same way). Found by a fresh-eyes review 2026-07-23.
+          //
+          // birthParentTerm only APPLIES to the default adoptionPath
+          // (buildOriginSentence's own gating, mirrored here) — its select
+          // is hidden for Foster care/International/Kinship, but
+          // state.answers.birthParentTerm still holds its last value (every
+          // select gets defaulted into state.answers the moment it first
+          // renders), so the fix above alone kept splicing a stale/hidden
+          // "birth mom" into the placeholder for those three paths, exactly
+          // the misrepresentation prompts.js's own field comment warns
+          // against. Found by a second fresh-eyes review the same day.
+          const path = state.answers.adoptionPath || 'A birth parent chose us';
+          const term = path === 'A birth parent chose us' ? (state.answers.birthParentTerm || 'birth mom') : 'birth family';
+          input.placeholder = 'e.g. Your ' + term + ' loves music, just like you do.';
         } else {
           input.placeholder = f.placeholder || '';
         }
@@ -686,27 +790,63 @@
     });
   }
 
+  // A pasted value can carry control characters (e.g. a tab — it survives
+  // even though pressing the Tab key just moves focus, a real scenario when
+  // copying two names out of adjacent spreadsheet cells) or Unicode line/
+  // paragraph separators (U+2028/U+2029 — a real paste artifact from some
+  // rich-text/word-processor sources) that a single-line <input> doesn't
+  // strip on its own. jsPDF's standard font has no glyph for most of these,
+  // so instead of rendering as whitespace they come out as a wrong, visible
+  // glyph (e.g. U+2028 rendered as a stray "(") or, for a raw tab, a large
+  // blank gap — normalize all of them to a plain space before they reach
+  // state. \p{Cc} covers the ASCII/C1 control-character range this used to
+  // hardcode as \x00-\x1f\x7f; \p{Zl}/\p{Zp} cover U+2028/U+2029 specifically
+  // (the same categories collectUnsupportedGlyphs() already treats as
+  // invisible-but-unsupported for the charset warning).
+  // .normalize('NFC') collapses a decomposed accented character (base
+  // letter + separate combining mark, e.g. "i" + U+0301 — a real paste
+  // artifact from some clipboard/IME sources) into its precomposed form
+  // ("í", U+00ED). Precomposed Latin-1 accents are within jsPDF's
+  // standard-font support and render correctly; the decomposed form's
+  // combining mark alone is not, so without this a name that LOOKS
+  // identical in the preview would render broken in the PDF and trip
+  // collectUnsupportedGlyphs()'s warning for no reason a parent could
+  // see or fix.
+  function sanitizeTextValue(str) {
+    return str.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').normalize('NFC');
+  }
+
+  // parentsLabelCustom is the one field whose value later gets SPLIT into
+  // multiple names (getParentsList(), below) using ,&;/ and the word "and"
+  // as separators. A literal tab pasted from adjacent spreadsheet cells
+  // (e.g. "Grandma<TAB>Grandpa" — a realistic way to enter two names at
+  // once) is a real separator here, but sanitizeTextValue()'s generic
+  // control-character-to-space substitution (added 2026-07-20 to fix a
+  // different bug: a raw tab rendering as a large blank gap in the PDF)
+  // collapses it to a single space — indistinguishable from a real
+  // two-word name like "Uncle Bob" — silently fusing two caregivers into
+  // one garbled pseudo-person with no warning. Converting a tab to a comma
+  // specifically for this one field, before the general sanitizer runs,
+  // keeps it as a real separator getParentsList() already recognizes,
+  // without changing tab-handling for every other field (childName etc.
+  // correctly keep becoming a plain space). Found by a fresh-eyes review
+  // 2026-07-24.
+  function sanitizeFieldValue(id, value) {
+    const withSeparators = id === 'parentsLabelCustom' ? value.replace(/\t/g, ',') : value;
+    return sanitizeTextValue(withSeparators);
+  }
+
   function onFieldChange(f, input) {
     return () => {
       if (f.id === 'bookTitle') state.titleTouched = true;
-      // A pasted value can carry control characters a single-line <input>
-      // doesn't strip on its own (e.g. a tab survives even though pressing
-      // the Tab key just moves focus — a real scenario when copying two
-      // names out of adjacent spreadsheet cells). jsPDF renders a raw tab
-      // as a large blank gap rather than a space, so normalize any control
-      // character to a plain space before it reaches state.
-      // .normalize('NFC') collapses a decomposed accented character (base
-      // letter + separate combining mark, e.g. "i" + U+0301 — a real paste
-      // artifact from some clipboard/IME sources) into its precomposed form
-      // ("í", U+00ED). Precomposed Latin-1 accents are within jsPDF's
-      // standard-font support and render correctly; the decomposed form's
-      // combining mark alone is not, so without this a name that LOOKS
-      // identical in the preview would render broken in the PDF and trip
-      // collectUnsupportedGlyphs()'s warning for no reason a parent could
-      // see or fix.
-      state.answers[f.id] = input.value.replace(/[\x00-\x1f\x7f]/g, ' ').normalize('NFC');
-      // numSiblings/parentsLabel/adoptionPath changes may add/remove dependent fields.
-      if (f.id === 'numSiblings' || f.id === 'parentsLabel' || f.id === 'adoptionPath') {
+      state.answers[f.id] = sanitizeFieldValue(f.id, input.value);
+      // numSiblings/parentsLabel/adoptionPath changes may add/remove dependent
+      // fields; birthParentTerm changes joyfulDetail's placeholder (see the
+      // f.id === 'joyfulDetail' branch above) — without a rebuild, switching
+      // it from the default "birth mom" wouldn't update the still-empty
+      // joyfulDetail field's placeholder until some other field happened to
+      // trigger one.
+      if (f.id === 'numSiblings' || f.id === 'parentsLabel' || f.id === 'adoptionPath' || f.id === 'birthParentTerm') {
         renderFields();
       }
       renderPreview();
@@ -1006,10 +1146,18 @@
     // together) and Foster care (may have been living together for months or
     // years) the same way the neighboring "held"/"journey" pages already
     // guard against for those two paths. Found by a fresh-eyes review
-    // 2026-07-23, the 7th instance of this same contradiction class.
+    // 2026-07-23, the 7th instance of this same contradiction class. Blended
+    // family is an 8th: it wasn't included in this if/else even though the
+    // neighboring "held" page just above already special-cases it (two
+    // already-existing families gradually merging, not a homecoming trip —
+    // "the whole family" as a separate audience to tell doesn't even make
+    // sense here, since the merging families already ARE the whole family).
+    // Found by a fresh-eyes review 2026-07-23.
     let headedHomeText;
     if (isKinshipAdoption) {
       headedHomeText = 'And from that day on, it was official — ' + name + ' had always been family, and now everyone knew it for certain.';
+    } else if (isBlended) {
+      headedHomeText = 'And from that day on, they were simply one family — together for good.';
     } else if (isFosterCare) {
       headedHomeText = 'And from that day forward, they just kept right on being family — official now, and forever.';
     } else {
@@ -1100,9 +1248,24 @@
     const previousPage = (state._lastRenderedPages || [])[state.previewIndex];
     const pages = buildPages();
     if (previousPage) {
-      const matchIndex = pages.findIndex(
+      let matchIndex = pages.findIndex(
         (p) => p.kind === previousPage.kind && p.label === previousPage.label && p.text === previousPage.text
       );
+      // numSiblings is the one field whose change can simultaneously shift
+      // page positions (removing/adding the sibling-hug page) AND rewrite
+      // the TEXT of a different, still-present page that mentions sibling
+      // names/count (e.g. "Our family" on the family-portrait page) — so
+      // the exact content match above fails even though the reader is still
+      // looking at conceptually the same page, and the raw numeric index
+      // (now pointing at whatever shifted into that slot) isn't out of
+      // bounds either, so it silently shows the wrong page. Found by a
+      // fresh-eyes review 2026-07-23. Fall back to matching by `kind` alone
+      // for the three kinds guaranteed to appear at most once per book
+      // (title/baby-portrait/family-portrait) — safe because there's never
+      // more than one to be ambiguous between, unlike 'text'/'closing'.
+      if (matchIndex === -1 && ['title', 'baby-portrait', 'family-portrait'].includes(previousPage.kind)) {
+        matchIndex = pages.findIndex((p) => p.kind === previousPage.kind);
+      }
       if (matchIndex !== -1) state.previewIndex = matchIndex;
     }
     state._lastRenderedPages = pages;
@@ -1167,7 +1330,10 @@
     els.prevBtn.disabled = state.previewIndex === 0;
     els.nextBtn.disabled = state.previewIndex === pages.length - 1;
 
-    els.downloadBtn.disabled = !state.storyType || !allRequiredFilled() || pendingPhotoUploads > 0;
+    // isGeneratingPdf: a Prev/Next click mid-generation must not re-enable
+    // the button out from under the still-visible "Generating…" label —
+    // see the reentrancy guard in downloadBook() for the full story.
+    els.downloadBtn.disabled = isGeneratingPdf || !state.storyType || !allRequiredFilled() || pendingPhotoUploads > 0;
     updateDownloadHint();
 
     const badChars = collectUnsupportedGlyphs(pages);
@@ -1273,6 +1439,14 @@
       // here so the parent gets a clear signal instead of their input
       // being silently swapped for boilerplate.
       if (f.id === 'helperDetail' || f.id === 'howCame') return !!stripTrailingPunctuation(value.trim());
+      // Same failure shape for the promise field — the book's single most
+      // important line ("Every Origin Story ends the same way: an
+      // unconditional promise"). It's rendered near-verbatim in buildPages()
+      // (`a.promise.trim()`, its own standalone page, not spliced), so a
+      // punctuation-only value like "..." isn't garbled — it's just printed
+      // as literally "..." on the promise page with nothing to warn the
+      // parent the required field is effectively empty. Found live 2026-07-23.
+      if (f.id === 'promise') return !!stripTrailingPunctuation(value.trim());
       return true;
     });
   }
@@ -1291,6 +1465,15 @@
   function updateDownloadHint() {
     if (els.downloadError && !els.downloadError.hidden) {
       els.downloadHint.textContent = '';
+      return;
+    }
+    // Without this, a Prev/Next click mid-generation (renderPreview() calls
+    // this) would overwrite the "Generating…" hint with "ready"/"fill in the
+    // required prompts" text right next to a button that still literally
+    // reads "Generating your book…" — the same disagreeing-UI-regions class
+    // already fixed for other banners.
+    if (isGeneratingPdf) {
+      els.downloadHint.textContent = 'Generating your book — this can take a few seconds for a longer story.';
       return;
     }
     if (pendingPhotoUploads > 0) {
@@ -1347,6 +1530,17 @@
     // Enter keypress lands in the same tick the upload begins, before the
     // disabled state has painted.
     if (pendingPhotoUploads > 0) return;
+    // Guard against reentrancy the same way startOver()/selectStoryType()
+    // already do: the ~2-frame gap before buildAndSaveDoc() actually runs
+    // (below) leaves a window where renderPreview() (from a Prev/Next click,
+    // not a second Download click — already guarded via evt.detail above)
+    // can flip els.downloadBtn back to enabled, since it didn't know
+    // generation was in progress. Without this guard, that click re-enters
+    // downloadBook(), producing two PDF downloads from one Download click
+    // plus one Prev/Next click, and can leave the button permanently stuck
+    // reading "Generating your book…" if the reentrant call's finally block
+    // runs last. Found by a fresh-eyes review 2026-07-23.
+    if (isGeneratingPdf) return;
     els.downloadError.hidden = true;
     // buildAndSaveDoc() draws every page synchronously and can block the main
     // thread for a noticeable stretch on a heavy book (several avatar scenes
@@ -1363,22 +1557,53 @@
     const originalLabel = els.downloadBtn.textContent;
     els.downloadBtn.textContent = 'Generating your book…';
     els.downloadHint.textContent = 'Generating your book — this can take a few seconds for a longer story.';
+    const runGeneration = () => {
+      try {
+        // pendingPhotoUploads was 0 when downloadBook() started (checked
+        // above), but a drag-and-drop photo upload isn't blocked by
+        // isGeneratingPdf (only the Download button itself is disabled) and
+        // cropPhotoToSquare() is async — it can start and still be in
+        // flight by the time this callback runs, ~2 frames later. Building
+        // now would silently bake the OLD photo/avatar into the PDF while
+        // the live preview moves on to the new one, with no warning.
+        // Bail and let the normal pendingPhotoUploads-aware disabled state
+        // (set in the finally block below) prompt a clean retry once the
+        // upload actually finishes. Found by a fresh-eyes review 2026-07-23.
+        if (pendingPhotoUploads > 0) return;
+        buildAndSaveDoc();
+      } catch (e) {
+        console.error('PDF generation failed:', e);
+        els.downloadError.hidden = false;
+        els.downloadError.textContent =
+          "We couldn't create your PDF — please check your internet connection and try again.";
+      } finally {
+        isGeneratingPdf = false;
+        els.downloadBtn.textContent = originalLabel;
+        els.downloadBtn.disabled = !state.storyType || !allRequiredFilled() || pendingPhotoUploads > 0;
+        updateDownloadHint();
+      }
+    };
+    // requestAnimationFrame callbacks are suspended (not just throttled) in a
+    // backgrounded tab in every major browser — if a parent clicks Download
+    // and switches to another tab/app before the next frame paints (an
+    // ordinary thing to do while "waiting"), the two queued rAF callbacks
+    // below can simply never fire, leaving the button stuck reading
+    // "Generating your book…" indefinitely with no error, until they happen
+    // to return to this exact tab. Falling back to a visibilitychange
+    // listener means generation still runs the moment the tab becomes
+    // visible again, even if rAF is still suspended at that point. Found by
+    // a fresh-eyes review 2026-07-24.
+    let ran = false;
+    const runOnce = () => {
+      if (ran) return;
+      ran = true;
+      document.removeEventListener('visibilitychange', onVisible);
+      runGeneration();
+    };
+    const onVisible = () => { if (!document.hidden) runOnce(); };
+    document.addEventListener('visibilitychange', onVisible);
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        try {
-          buildAndSaveDoc();
-        } catch (e) {
-          console.error('PDF generation failed:', e);
-          els.downloadError.hidden = false;
-          els.downloadError.textContent =
-            "We couldn't create your PDF — please check your internet connection and try again.";
-        } finally {
-          isGeneratingPdf = false;
-          els.downloadBtn.textContent = originalLabel;
-          els.downloadBtn.disabled = !state.storyType || !allRequiredFilled() || pendingPhotoUploads > 0;
-          updateDownloadHint();
-        }
-      });
+      requestAnimationFrame(runOnce);
     });
   }
 

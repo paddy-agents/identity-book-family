@@ -44,7 +44,23 @@
         your browser settings and reload this page to continue.</p>
       </div>
       <style>
-        .story-type-heading, #story-types { display: none; }
+        /* .lede describes the interactive preview/save/download flow in the
+           present tense ("preview your book as you go... download it as a
+           keepsake PDF") — directly contradicting the notice above it,
+           which says the page "can't work with JavaScript turned off", if
+           left visible. Found by a fresh-eyes review 2026-07-24. */
+        .story-type-heading, #story-types, .lede { display: none; }
+        /* Without this, printing/print-previewing this page with JS off
+           shows this notice AND the unconditional ".print-only" redirect
+           message ("go click Download...") at the same time — advice
+           that's actively wrong here, since there's no working Download
+           button without JS. This <style> only exists in the DOM when
+           scripting is disabled (that's what <noscript> means), so it
+           can't affect the normal JS-enabled print behavior. Found by a
+           fresh-eyes review 2026-07-23. */
+        @media print {
+          .print-only { display: none; }
+        }
       </style>
     </noscript>
 
