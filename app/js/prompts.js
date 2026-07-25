@@ -234,6 +234,7 @@ const ORIGIN_FIELDS = {
     {
       id: 'joyfulDetail',
       label: 'One joyful detail about the person who carried your child',
+      hint: 'A name, a shared trait, a kindness. Optional — skip if it doesn’t feel right yet.',
       type: 'text',
       placeholder: 'e.g. She sang to you every night before bed.',
       required: false,
@@ -265,6 +266,7 @@ const ORIGIN_FIELDS = {
     {
       id: 'joyfulDetail',
       label: 'One joyful detail about your journey to your child (a milestone, a keepsake)',
+      hint: 'A name, a shared trait, a kindness. Optional — skip if it doesn’t feel right yet.',
       type: 'text',
       placeholder: 'e.g. We kept the positive test in a memory box.',
       required: false,
@@ -284,6 +286,7 @@ const ORIGIN_FIELDS = {
     {
       id: 'joyfulDetail',
       label: 'One joyful detail about the family you joined',
+      hint: 'A name, a shared trait, a kindness. Optional — skip if it doesn’t feel right yet.',
       type: 'text',
       placeholder: 'e.g. Your new brother taught you to ride a bike.',
       required: false,

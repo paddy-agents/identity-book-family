@@ -198,6 +198,21 @@
     renderFields();
     if (els.savedNote) els.savedNote.hidden = false;
     document.body.dataset.theme = state.storyType;
+    // renderFields() above (via getVisibleFields()/ensureAvatarDefaults())
+    // can silently correct corrupted/stale values in state.answers (an
+    // out-of-range numSiblings, an invalid select option, a bad avatar
+    // sub-field) without ever calling saveProgress() itself — so a restore
+    // from corrupted storage leaves the in-memory state corrected but
+    // localStorage still holding the original, uncorrected JSON. That
+    // divergence is invisible in a single normal session, but a later
+    // bfcache restore (see the 'pageshow' listener above) compares this
+    // tab's own current state against localStorage and reads the mismatch
+    // as another tab having made changes — a false "changed in another
+    // open tab" warning with no other tab involved at all. Persisting the
+    // corrected state right away keeps the two in sync. Harmless when
+    // nothing was corrected: identical JSON doesn't fire a 'storage' event
+    // in other tabs. Found by a fresh-eyes review 2026-07-24.
+    saveProgress();
   }
 
   // Shared by the 'storage' listener (fires in other tabs on every write)
@@ -218,20 +233,28 @@
     // it's not an actual conflict and warning about it is a false alarm,
     // the same "don't warn when there's nothing at stake" reasoning already
     // applied above for a fresh tab. Found by a fresh-eyes review 2026-07-23.
-    let onlyPreviewIndexChanged = false;
+    // titleTouched is the same shape of false alarm: it's internal
+    // bookkeeping (only affects whether a FUTURE story-type switch
+    // auto-fills the title box), not visible book content — typing a
+    // character into the title field and then deleting it back to the
+    // original text is an ordinary interaction that flips titleTouched
+    // false->true with bookTitle byte-identical before and after. Found by
+    // a fresh-eyes review 2026-07-24.
+    let onlyIgnorableFieldsChanged = false;
     try {
-      const withoutPreviewIndex = (raw) => {
+      const normalizeForConflictCheck = (raw) => {
         if (!raw) return raw;
         const parsed = JSON.parse(raw);
         delete parsed.previewIndex;
+        delete parsed.titleTouched;
         return JSON.stringify(parsed);
       };
-      onlyPreviewIndexChanged = withoutPreviewIndex(oldValue) === withoutPreviewIndex(newValue);
+      onlyIgnorableFieldsChanged = normalizeForConflictCheck(oldValue) === normalizeForConflictCheck(newValue);
     } catch (err) {
       // Malformed JSON on either side — fall through and warn, same as the
       // pre-existing behavior.
     }
-    if (onlyPreviewIndexChanged) return;
+    if (onlyIgnorableFieldsChanged) return;
     // newValue is null when the other tab removed the key (Start Over), not
     // edited it — "reload to see the changes" would be misleading there,
     // since reloading actually shows an empty story, not new content.
@@ -357,6 +380,26 @@
     document.body.dataset.theme = id;
   }
 
+  // The browser's own maxlength enforcement only applies to user
+  // typing/pasting into an <input> — it does NOT constrain a value set
+  // programmatically (state.answers[f.id] = value, which restoreSavedProgress()
+  // does verbatim from localStorage). A corrupted/hand-edited saved value
+  // far longer than its field's own maxLength (e.g. a 300-char childName,
+  // 40-char cap) sails through every existing guard and reaches
+  // buildPages()/the PDF renderer unclamped — fitTextBlock()'s autofit
+  // handles some of those splices gracefully, but any page that renders a
+  // field at a FIXED size (e.g. the italic "How X joined our family" label)
+  // has no such protection and visibly overlaps the text below it. Same
+  // corrupted-localStorage threat model already guarded for every other
+  // field (select values, previewIndex, numSiblings, avatar sub-fields,
+  // bookTitle) — clamping here, alongside the select-field normalization
+  // above, closes it the same way. Found by live testing 2026-07-25.
+  function clampTextFieldValue(f) {
+    if (f.type === 'text' && f.maxLength && typeof state.answers[f.id] === 'string' && state.answers[f.id].length > f.maxLength) {
+      state.answers[f.id] = state.answers[f.id].slice(0, f.maxLength);
+    }
+  }
+
   // Builds the full ordered field list for the CURRENT answers, including the
   // dynamic sibling-name fields (count depends on numSiblings) and any
   // showIf-conditional fields (e.g. parentsLabelCustom).
@@ -387,19 +430,50 @@
         // written verbatim into the <select> (selectedIndex -1, blank display)
         // even though the sibling-name fields it generates are correctly capped.
         state.answers.numSiblings = String(n);
-        for (let i = 1; i <= n; i++) out.push(siblingField(i));
+        for (let i = 1; i <= n; i++) {
+          const sf = siblingField(i);
+          clampTextFieldValue(sf);
+          out.push(sf);
+        }
         return;
       }
       if (f.showIf && !f.showIf(state.answers)) return;
+      clampTextFieldValue(f);
       out.push(f);
     });
     return out;
   }
 
+  // Same corrupted/hand-edited-localStorage threat model already guarded for
+  // every other stateful field (select fields normalized in getVisibleFields(),
+  // numSiblings/previewIndex/storyType each clamped/validated on restore) —
+  // but childAvatar's four sub-keys (skinTone/hairStyle/hairColor/eyeColor)
+  // were only ever checked for total absence, not for an invalid id within an
+  // existing object. An invalid id (e.g. skinTone: 'purple') silently falls
+  // back to AvatarKit's own internal default in the RENDERED avatar
+  // (avatar.js's hexFor()), while the swatch-button UI compares against the
+  // raw, uncorrected value — so every swatch in that row shows as unselected/
+  // aria-pressed="false", desyncing the visible "nothing chosen" UI from the
+  // avatar actually being drawn (and that will end up in the PDF). Found by a
+  // fresh-eyes review 2026-07-24.
   function ensureAvatarDefaults() {
-    if (!state.answers.childAvatar) {
+    if (!state.answers.childAvatar || typeof state.answers.childAvatar !== 'object') {
       state.answers.childAvatar = Object.assign({}, AvatarKit.DEFAULT_AVATAR);
+      return;
     }
+    const avatar = state.answers.childAvatar;
+    const optionLists = {
+      skinTone: AvatarKit.SKIN_TONES,
+      hairStyle: AvatarKit.HAIR_STYLES,
+      hairColor: AvatarKit.HAIR_COLORS,
+      eyeColor: AvatarKit.EYE_COLORS,
+    };
+    Object.keys(optionLists).forEach((key) => {
+      const validIds = optionLists[key].map((opt) => opt.id);
+      if (!validIds.includes(avatar[key])) {
+        avatar[key] = AvatarKit.DEFAULT_AVATAR[key];
+      }
+    });
   }
 
   function renderFields() {
@@ -530,6 +604,79 @@
         input.setAttribute('aria-required', 'true');
       }
       state.answers[f.id] = value;
+
+      // parentsLabelCustom is the one field that later gets SPLIT into
+      // multiple names — a real, realistic way to enter two names at once
+      // is pasting them from two stacked lines (a notes app, or two cells
+      // from a column instead of a row in a spreadsheet). Unlike a tab
+      // (already handled in sanitizeFieldValue()), the browser's own value
+      // sanitization algorithm for a single-line <input> STRIPS embedded
+      // newlines entirely — no space, no trace — before the 'input' event
+      // this app listens to ever fires, so "Grandma\nGrandpa" already
+      // arrives as "GrandmaGrandpa" with zero separator, unrecoverable
+      // after the fact. Intercepting the 'paste' event directly (which
+      // still exposes the raw, unsanitized clipboard text) is the only
+      // point this can still be caught — same fix shape as the tab case,
+      // just one step earlier in the pipeline. Found by live testing
+      // 2026-07-24, following up the same-day tab-separated-paste fix.
+      if (f.id === 'parentsLabelCustom') {
+        input.addEventListener('paste', (e) => {
+          const clip = e.clipboardData || window.clipboardData;
+          const pasted = clip ? clip.getData('text/plain') : '';
+          if (!/[\r\n]/.test(pasted)) return;
+          e.preventDefault();
+          let sanitized = pasted.replace(/[\r\n]+/g, ', ');
+          const start = input.selectionStart;
+          const end = input.selectionEnd;
+          const before = input.value.slice(0, start);
+          const after = input.value.slice(end);
+          // A leading or trailing newline in the pasted text (a realistic
+          // artifact — many apps include one when a whole line/column is
+          // copied, e.g. "Grandma\nGrandpa\n") collapses to a dangling ", "
+          // at the edge of `sanitized`. When that side of the paste is
+          // genuinely empty, it's just stray noise — trim it so the
+          // visible box doesn't show leftover punctuation a parent might
+          // mistake for a real (and now-lost) entry.
+          if (before === '') sanitized = sanitized.replace(/^,\s*/, '');
+          if (after === '') sanitized = sanitized.replace(/,\s*$/, '');
+          // But when that side is NOT empty — e.g. appending "Auntie\n"
+          // right after already-typed "Grandma and Grandpa" — the artifact
+          // just trimmed above WAS the only thing standing between the old
+          // and new content; removing it (or never having one at all, for
+          // a paste with no boundary newline) fuses them into one garbled
+          // pseudo-name ("GrandpaAuntie") that getParentsList() can't
+          // split apart. Insert a real separator at the boundary whenever
+          // real content butts up against real content with none already
+          // there. Plain whitespace doesn't count as "already separated"
+          // here — getParentsList() only splits on ,&;/ or the word
+          // "and", not bare spaces. Found by a fresh-eyes review
+          // 2026-07-25, following up the same-day dangling-artifact trim
+          // above (which alone doesn't fix this — it only ever removes
+          // noise, it never restores a separator the trim itself removed).
+          const sepEnd = /[,;&/]\s*$/;
+          const sepStart = /^\s*[,;&/]/;
+          if (before && !sepEnd.test(before) && !sepStart.test(sanitized)) {
+            sanitized = ', ' + sanitized;
+          }
+          if (after && !sepStart.test(after) && !sepEnd.test(sanitized)) {
+            sanitized = sanitized + ', ';
+          }
+          const combined = before + sanitized + after;
+          // Programmatically assigning .value (unlike typing or a native
+          // single-line paste) is NOT subject to the maxlength attribute —
+          // the browser only enforces that on user-driven edits. Without
+          // this slice, a multi-line paste (several caregiver names, one
+          // per line — the exact scenario this handler exists for) could
+          // silently blow straight past the field's own 80-char cap, the
+          // same safety net every other field's input relies on to bound
+          // PDF layout. Found by a fresh-eyes review 2026-07-24.
+          const max = input.maxLength > 0 ? input.maxLength : combined.length;
+          input.value = combined.slice(0, max);
+          const newPos = Math.min(start + sanitized.length, input.value.length);
+          input.setSelectionRange(newPos, newPos);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      }
 
       // A single 'input' listener is enough — <select> fires both 'input' and
       // 'change' natively in all evergreen browsers, so listening to both
@@ -813,7 +960,20 @@
   // collectUnsupportedGlyphs()'s warning for no reason a parent could
   // see or fix.
   function sanitizeTextValue(str) {
-    return str.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').normalize('NFC');
+    // \p{Cf} ("Format") covers zero-width space/joiner/non-joiner, soft
+    // hyphen, and bidi marks — genuinely invisible, zero-width characters a
+    // parent can't see or intentionally type (typically clipboard artifacts
+    // from Docs/Notion/messaging apps). Unlike \p{Cc}/\p{Zl}/\p{Zp} above,
+    // these are removed outright rather than turned into a space: replacing
+    // a zero-width character with a visible space would insert space where
+    // none was perceived (e.g. a soft hyphen mid-word, "Sar­ah", must
+    // collapse back to "Sarah", not "Sar ah"). Without this, a value made
+    // up ENTIRELY of invisible format characters (e.g. a single pasted
+    // zero-width space) survived every truthiness/`.trim()` blank check in
+    // the app unchanged — passing required-field validation and splicing an
+    // invisible "name" into the book with no visible content and no error.
+    // Found by a fresh-eyes review 2026-07-25.
+    return str.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ').replace(/\p{Cf}/gu, '').normalize('NFC');
   }
 
   // parentsLabelCustom is the one field whose value later gets SPLIT into
@@ -839,7 +999,29 @@
   function onFieldChange(f, input) {
     return () => {
       if (f.id === 'bookTitle') state.titleTouched = true;
-      state.answers[f.id] = sanitizeFieldValue(f.id, input.value);
+      const sanitized = sanitizeFieldValue(f.id, input.value);
+      state.answers[f.id] = sanitized;
+      // sanitizeFieldValue() can change MEANING, not just invisible cleanup —
+      // most notably a tab pasted into parentsLabelCustom (from adjacent
+      // spreadsheet cells) becomes a comma separator, so getParentsList()
+      // reads it correctly and the saved/downloaded book is already right —
+      // but without this, the visible <input> box itself kept showing the
+      // raw tab (a wide blank gap, not a separator) indefinitely, since
+      // nothing resyncs input.value after a normal keystroke/native paste
+      // (only the initial render and the dedicated multi-line-paste handler
+      // ever write to it). A parent seeing their two names visually fused
+      // could "fix" already-correct saved data by retyping. Guarded on an
+      // actual difference so every other field's untouched keystrokes don't
+      // needlessly reset the caret, and on setSelectionRange existing since
+      // this function is also used for <select> elements (no notion of a
+      // text caret — sanitizeTextValue() is a no-op on their option-text
+      // values in practice, but don't rely on that to avoid a crash). Found
+      // by a fresh-eyes review 2026-07-25.
+      if (sanitized !== input.value && typeof input.setSelectionRange === 'function') {
+        const pos = Math.min(input.selectionStart, sanitized.length);
+        input.value = sanitized;
+        input.setSelectionRange(pos, pos);
+      }
       // numSiblings/parentsLabel/adoptionPath changes may add/remove dependent
       // fields; birthParentTerm changes joyfulDetail's placeholder (see the
       // f.id === 'joyfulDetail' branch above) — without a rebuild, switching
@@ -923,6 +1105,20 @@
   // found live via a fresh-eyes review 2026-07-22.
   function stripTrailingPunctuation(str) {
     return str.replace(/\s*[.!?,;…]+$/, '');
+  }
+
+  // helperDetail/howCame are documented in prompts.js as short phrases meant
+  // to be spliced mid-sentence ("a short phrase, starting with a verb"), with
+  // lowercase placeholder examples — but a parent typing into an empty text
+  // box naturally capitalizes the first letter, as if starting a new
+  // sentence. Uncorrected, that produces a jarring mid-sentence capital in
+  // the final PDF ("wanted Maya so much — A kind doctor..."), the same
+  // "looks fine typed in, wrong once spliced into prose" failure mode this
+  // app already guards against for trailing punctuation. `charAt`/`toLowerCase`
+  // on a non-letter first character (a digit, an emoji) is a safe no-op.
+  // Found by a fresh-eyes review 2026-07-24.
+  function lowercaseFirst(str) {
+    return str.charAt(0).toLowerCase() + str.slice(1);
   }
 
   function joinWithAnd(items) {
@@ -1046,7 +1242,15 @@
 
     pages.push({ kind: 'text', label: 'How ' + name + ' joined our family', text: buildOriginSentence(state.storyType, a, name, parentsPhrase), motif: 'house-heart' });
 
-    if (a.joyfulDetail && a.joyfulDetail.trim()) {
+    // joyfulDetail/signOff are optional and shown verbatim (see the comment
+    // above stripTrailingPunctuation — they intentionally keep whatever
+    // punctuation the parent wrote, unlike spliced fields), so neither one
+    // is ever checked by allRequiredFilled(). Without re-checking the
+    // STRIPPED value here too, a punctuation-only value (e.g. "...") passed
+    // the plain .trim() truthiness check and shipped a whole page whose
+    // entire content was "...", with no warning, in both the live preview
+    // and the real downloaded PDF. Found by a fresh-eyes review 2026-07-24.
+    if (a.joyfulDetail && stripTrailingPunctuation(a.joyfulDetail.trim())) {
       pages.push({ kind: 'text', label: 'A joyful detail', text: a.joyfulDetail.trim(), motif: 'sparkle' });
     }
 
@@ -1176,7 +1380,8 @@
       pages.push({ kind: 'text', label: 'Our promise to you', text: a.promise.trim(), motif: 'heart' });
     }
 
-    if (a.signOff && a.signOff.trim()) {
+    // Same punctuation-only guard as joyfulDetail above.
+    if (a.signOff && stripTrailingPunctuation(a.signOff.trim())) {
       pages.push({ kind: 'closing', text: a.signOff.trim(), motif: 'sparkle' });
     }
 
@@ -1202,7 +1407,7 @@
       // "...wanted Maya so much — , and then...". Same failure shape
       // already fixed for childName/siblingName; the `||` re-checks the
       // actual value that gets used.
-      const detail = (a.helperDetail && stripTrailingPunctuation(a.helperDetail.trim())) || 'a little help from science';
+      const detail = lowercaseFirst((a.helperDetail && stripTrailingPunctuation(a.helperDetail.trim())) || 'a little help from science');
       // Donor conception is a true, distinct part of some families' stories —
       // named plainly here rather than folded silently into this detail
       // (see docs/family-language-review.md).
@@ -1216,7 +1421,7 @@
     }
     if (storyTypeId === 'blended') {
       // Same fallback fix as helperDetail above.
-      const how = (a.howCame && stripTrailingPunctuation(a.howCame.trim())) || 'met, fell in love, and became one family';
+      const how = lowercaseFirst((a.howCame && stripTrailingPunctuation(a.howCame.trim())) || 'met, fell in love, and became one family');
       return parentsPhrase + ' ' + how + ', and that is how our family grew.';
     }
     // adoption — the story differs by real path (see docs/adoption-language-review.md):
@@ -1651,15 +1856,21 @@
           // routine is resolution-independent so this costs nothing visually.
           const imgSrc = page.photo || avatarSceneFor('face', 625);
           const imgFormat = page.photo ? 'JPEG' : 'PNG';
+          // restoreGraphicsState() MUST run even if addImage() throws (corrupt/
+          // unsupported image data) — otherwise the circular clip set by
+          // doc.clip() below stays in effect for the rest of this page's
+          // content stream, silently cutting off the title/subtitle text
+          // drawn further down. Found by a fresh-eyes review 2026-07-25.
+          doc.saveGraphicsState();
           try {
-            doc.saveGraphicsState();
             doc.circle(cx, cy, rad, null);
             doc.clip();
             doc.discardPath();
             doc.addImage(imgSrc, imgFormat, photoX, photoY, photoSize, photoSize, undefined, 'MEDIUM');
-            doc.restoreGraphicsState();
           } catch (e) {
             // Corrupt/unsupported image data — skip the photo, keep the rest of the page intact.
+          } finally {
+            doc.restoreGraphicsState();
           }
           doc.setDrawColor(theme.WARM[0], theme.WARM[1], theme.WARM[2]);
           doc.setLineWidth(2);

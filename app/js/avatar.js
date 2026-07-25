@@ -161,26 +161,12 @@
     // head's stroke sits at exactly r), so drawing the head second painted
     // its boundary stroke straight across each ear, splitting it into two
     // crescents with a stray line down the middle (found 2026-07-22 by
-    // actually rendering and zooming into the ear). Ears now drawn last so
-    // their own fill+stroke correctly paints over that line, the same way a
-    // real ear sits in front of (not behind) the side of a head.
+    // actually rendering and zooming into the ear).
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.fillStyle = skin;
     ctx.fill();
     ctx.stroke();
-
-    ctx.fillStyle = skin;
-    [-1, 1].forEach((side) => {
-      ctx.beginPath();
-      ctx.arc(cx + side * r * 0.98, cy + r * 0.05, r * 0.16, 0, Math.PI * 2);
-      ctx.fill();
-      // The ear pokes out past the main head circle's own stroked boundary
-      // (above) — without its own stroke, that exposed sliver was the same
-      // near-invisible unstroked skin-on-background patch the fix above
-      // solves for the head, just missed for this smaller shape.
-      ctx.stroke();
-    });
 
     // Blush is drawn BEFORE hair, not after: the 'long' hairstyle's side
     // strands (drawHair) geometrically reach down into this same cheek
@@ -197,6 +183,30 @@
     });
 
     drawHair(ctx, cx, cy, r, avatar.hairStyle, hairColor);
+
+    // Ears are drawn AFTER hair, not before: the 'pigtails' bump (center
+    // ~(cx-r*1.05, cy+r*0.25), radius r*0.3) and, to a lesser extent,
+    // 'curly' hair's side curls geometrically overlap most of the ear's own
+    // circle (center ~(cx-r*0.98, cy+r*0.05), radius r*0.16) — with ears
+    // drawn first, the opaque hair painted over ~79% of each ear, leaving
+    // only a thin disconnected crescent that reads as a stray floating line
+    // rather than a recognizable ear. 'short'/'bald'/'bun'/'long' don't
+    // reach far enough into the ear's bounding region to trigger this.
+    // Ears now drawn last so they correctly sit in front of hair, the same
+    // "later-drawn = frontmost" principle already used for head-vs-ear
+    // ordering above. Found by a fresh-eyes review 2026-07-25 (rendered and
+    // measured: pigtails covered ~79% of the ear's area).
+    ctx.fillStyle = skin;
+    [-1, 1].forEach((side) => {
+      ctx.beginPath();
+      ctx.arc(cx + side * r * 0.98, cy + r * 0.05, r * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+      // The ear pokes out past the main head circle's own stroked boundary
+      // (above) — without its own stroke, that exposed sliver was the same
+      // near-invisible unstroked skin-on-background patch the fix above
+      // solves for the head, just missed for this smaller shape.
+      ctx.stroke();
+    });
 
     [-1, 1].forEach((side) => {
       const ex = cx + side * r * 0.34;
@@ -236,7 +246,17 @@
       // guarantees a visible boundary regardless of the iris's own
       // luminance — a no-op visual change for the 3 colors that already had
       // enough contrast. Found by a fresh-eyes review 2026-07-23.
-      ctx.lineWidth = r * 0.012;
+      // Unlike every other stroke in this file (head/ear/sclera/mouth/ground
+      // line), this one had no Math.max() floor -- at the avatar builder's
+      // small 160px thumbnail and the 500px live-preview canvas, r*0.012
+      // rounds down to well under 1px, so the canvas anti-aliases it into a
+      // muddy partial blend (~3.5:1) instead of painting the ring at its
+      // true, designed color (~8.2:1) -- only reaching full strength at the
+      // PDF's larger 625/1042px canvases. A parent picking brown eyes saw a
+      // faint gray smudge in both places they'd actually look (the builder,
+      // the live preview) even though the same ring renders correctly once
+      // baked into the downloaded PDF. Found by a fresh-eyes review 2026-07-24.
+      ctx.lineWidth = Math.max(0.75, r * 0.012);
       ctx.strokeStyle = '#f2e6d3';
       ctx.stroke();
     });
@@ -345,11 +365,35 @@
       // on cx. With exactly 1 parent and 0 siblings, though, pinning the
       // face to cx left the lone parent hanging off to one side with a
       // lopsided gap of empty canvas on the other — the pair reads as
-      // off-center rather than composed. Shift both by half the tuned
-      // parent<->face gap (0.28*size) so their midpoint lands on cx while
-      // preserving that exact gap (it's sized for hair-style clearance).
+      // off-center rather than composed. The original fix (0.14*size) shifted
+      // by half the parent<->face *gap*, centering the two shapes' CENTERS —
+      // but the parent silhouette's body (half-width ~0.06*size) and the
+      // face-with-ears (half-width ~0.171*size) are very different widths, so
+      // centering their centers left the wider face's own bulge unbalanced:
+      // measured bounding box was 100px left margin vs 156px right margin on
+      // a 500px canvas (~1.56:1), the same magnitude/direction of imbalance
+      // already fixed once for twoParentWithSibling below. Re-derived from
+      // the actual rendered bounding box (not the shapes' nominal widths) —
+      // same fix shape, just for this combo. Found by a fresh-eyes review
+      // 2026-07-25.
       const soloDuo = parentCount === 1 && !siblingCount;
-      const faceCx = soloDuo ? cx + size * 0.14 : cx;
+      // 2 parents + 1 sibling is the app's own DEFAULT combo (parentsLabel
+      // defaults to "Mommy and Daddy") the instant a family has any
+      // siblings at all — not an edge case. The sibling sits at 0.42*size
+      // right of center (see siblingOffset below, tuned for hair
+      // clearance past the right parent), with nothing balancing it on the
+      // left, so the whole group's bounding box (left parent's edge to the
+      // sibling's edge) sat well right of center: left margin 0.16*size vs
+      // right margin only ~0.043*size, a ~3.7:1 imbalance confirmed by
+      // rendering. Shifting faceCx left by half that imbalance (derived
+      // from the bounding-box math, not guessed) makes the group's own
+      // bounding box exactly symmetric around cx — same fix shape as
+      // soloDuo above, just for a different lopsided combo. Found by a
+      // fresh-eyes review 2026-07-25.
+      const twoParentWithSibling = parentCount === 2 && siblingCount;
+      let faceCx = cx;
+      if (soloDuo) faceCx = cx + size * 0.084;
+      if (twoParentWithSibling) faceCx = cx - size * 0.0586;
       // Ground line is drawn BEFORE the silhouettes so their feet sit on top
       // of it, not the other way round — the line's color (warmHex) differs
       // from the parent silhouettes' fill (warmDarkHex), and stroking the
@@ -367,13 +411,13 @@
       ctx.lineWidth = Math.max(1.5, size * 0.004);
       ctx.beginPath();
       ctx.moveTo(size * 0.08, groundY);
-      // The two-parent+sibling combo places the sibling (scale 0.62, so its
-      // body half-width is ~0.037*size) at 0.42*size right of center — its
-      // outer edge lands at ~0.457*size, past the line's default 0.42*size
-      // right end (0.92 - 0.5 = 0.42), so it visibly hangs off the floor.
-      // Every other combo's rightmost figure stays well inside 0.42*size.
-      const lineRightEdge = parentCount === 2 && siblingCount ? 0.97 : 0.92;
-      ctx.lineTo(size * lineRightEdge, groundY);
+      // Every combo's rightmost figure edge (parent or sibling, computed from
+      // faceCx below) stays within 0.42*size of cx — including the
+      // 2-parent+sibling combo now that its group is re-centered above — so
+      // one shared right end covers all of them; a wider one-off (this used
+      // to be 0.97 for that combo before the recentering) is no longer
+      // needed.
+      ctx.lineTo(size * 0.92, groundY);
       ctx.stroke();
       // 0.28 (not 0.24) leaves room for the widest hair styles (long/pigtails,
       // ~1.35x the face radius) so hair never overlaps the parent silhouettes.
@@ -382,7 +426,12 @@
       // 2.5-2.94:1 across the 4 themes, below the 3:1 non-text minimum —
       // the same bug class the parent silhouettes just above already avoid
       // by using warmDarkHex instead. Matched here for the sibling figure too.
-      if (siblingCount) drawPersonSilhouette(ctx, cx + size * (parentCount === 2 ? 0.42 : 0.3), groundY, 0.62, warmDarkHex, size);
+      // Anchored to faceCx (not the fixed cx) so the sibling shifts together
+      // with the rest of the group in the twoParentWithSibling case above —
+      // anchoring it to cx instead would preserve the same imbalance this
+      // fix exists to remove.
+      const siblingOffset = parentCount === 2 ? 0.42 : 0.3;
+      if (siblingCount) drawPersonSilhouette(ctx, faceCx + size * siblingOffset, groundY, 0.62, warmDarkHex, size);
       drawFace(ctx, faceCx, groundY - size * 0.17, size * 0.15, avatar);
       return canvas.toDataURL('image/png');
     }
