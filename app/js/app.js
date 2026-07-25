@@ -997,7 +997,7 @@
   }
 
   function onFieldChange(f, input) {
-    return () => {
+    return (event) => {
       if (f.id === 'bookTitle') state.titleTouched = true;
       const sanitized = sanitizeFieldValue(f.id, input.value);
       state.answers[f.id] = sanitized;
@@ -1017,7 +1017,21 @@
       // text caret — sanitizeTextValue() is a no-op on their option-text
       // values in practice, but don't rely on that to avoid a crash). Found
       // by a fresh-eyes review 2026-07-25.
-      if (sanitized !== input.value && typeof input.setSelectionRange === 'function') {
+      //
+      // event.isComposing guards against a second, distinct problem: while
+      // an IME composition is still open (Vietnamese Telex/VNI, dead-key
+      // diacritic input methods commonly used for accented names), the
+      // browser dispatches intermediate 'input' events whose value can
+      // legitimately be a decomposed accent sequence that sanitizeTextValue()'s
+      // NFC normalization then diffs against — forcibly reassigning
+      // input.value/setSelectionRange mid-composition is a well-documented
+      // way to corrupt or prematurely terminate that composition session
+      // (the same reason React/Vue skip value-syncing between
+      // compositionstart/compositionend). Skipping the rewrite here is safe:
+      // the browser fires one more 'input' event with isComposing:false right
+      // after compositionend, which re-runs this same sync once composition
+      // has actually finished. Found by a fresh-eyes review 2026-07-25.
+      if (!(event && event.isComposing) && sanitized !== input.value && typeof input.setSelectionRange === 'function') {
         const pos = Math.min(input.selectionStart, sanitized.length);
         input.value = sanitized;
         input.setSelectionRange(pos, pos);

@@ -310,7 +310,12 @@ const CLOSING_FIELDS = [
   {
     id: 'signOff',
     label: 'A personal sign-off',
-    hint: 'The way a real handmade book ends: "I love you, Maya! XO, Mom."',
+    // Not literally the last page — buildPages() always appends one fixed
+    // closing page after this ("Everyone has a story...") — so this hint
+    // describes the personal-note STYLE of a handmade book's ending, not a
+    // literal claim that this is the final page. Found by a fresh-eyes
+    // review 2026-07-25.
+    hint: 'A personal closing note, like a real handmade book: "I love you, Maya! XO, Mom."',
     type: 'text',
     placeholder: 'I love you! XO, Mom',
     required: false,
