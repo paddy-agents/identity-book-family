@@ -377,6 +377,24 @@
       // same fix shape, just for this combo. Found by a fresh-eyes review
       // 2026-07-25.
       const soloDuo = parentCount === 1 && !siblingCount;
+      // The 0.084 shift below was derived from the face-WITH-EARS half-width
+      // (~0.171*size, ears reaching 1.14r) as the "widest" case — but two
+      // hairstyles' own shapes reach further than that baseline: 'pigtails'
+      // side bumps reach 1.35r (~0.2025*size, see the 0.28 ground-line-
+      // clearance comment below), 0.0315*size wider than the ear baseline
+      // (measured 1.14:1 imbalance at both real render sizes before
+      // compensation — a real proportional effect, not rounding noise,
+      // found by a fresh-eyes review 2026-07-25). 'curly's 7 tuft circles
+      // (see drawHair's curly branch) reach ~1.184r at their two outermost
+      // tufts (cos(18°)*r*0.95 + r*0.28), a smaller but still real and
+      // proportional ~3px@500px/6px@1042px imbalance — under
+      // pigtails' original magnitude, which is why it went unnoticed until
+      // a fresh-eyes review specifically re-checked every hairstyle against
+      // this same fix, not just the one that originally triggered it.
+      // Found 2026-07-26. Halved into the shift using the same
+      // bounding-box-symmetry derivation as the base constant.
+      const HAIR_SOLO_EXTRA_HALF_WIDTH = { pigtails: 0.0315, curly: 0.006 };
+      const soloExtraHalfWidth = (HAIR_SOLO_EXTRA_HALF_WIDTH[avatar.hairStyle] || 0) * size;
       // 2 parents + 1 sibling is the app's own DEFAULT combo (parentsLabel
       // defaults to "Mommy and Daddy") the instant a family has any
       // siblings at all — not an edge case. The sibling sits at 0.42*size
@@ -392,7 +410,7 @@
       // fresh-eyes review 2026-07-25.
       const twoParentWithSibling = parentCount === 2 && siblingCount;
       let faceCx = cx;
-      if (soloDuo) faceCx = cx + size * 0.084;
+      if (soloDuo) faceCx = cx + size * 0.084 - soloExtraHalfWidth / 2;
       if (twoParentWithSibling) faceCx = cx - size * 0.0586;
       // Ground line is drawn BEFORE the silhouettes so their feet sit on top
       // of it, not the other way round — the line's color (warmHex) differs

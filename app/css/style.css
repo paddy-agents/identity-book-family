@@ -107,7 +107,15 @@ h1.hero {
   transition: filter 0.15s ease;
 }
 
-.btn:hover { filter: brightness(0.88); }
+/* :not(:disabled) matters here even though .btn:disabled (below) never sets
+   `filter`: hovering a disabled button (Download before required fields are
+   filled, or Prev/Next at the first/last preview page) still visibly
+   darkened it ~9-12% under the cursor despite cursor:not-allowed already
+   saying it's inert — the earlier .btn.secondary:hover fix only guarded the
+   background/color properties it shared with .btn:disabled, so this
+   same-element, different-property rule slipped through unnoticed. Found by
+   a fresh-eyes review 2026-07-26. */
+.btn:hover:not(:disabled) { filter: brightness(0.88); }
 
 .btn.secondary {
   background: transparent;
@@ -138,6 +146,23 @@ h1.hero {
 }
 
 .link-btn:hover { filter: brightness(0.8); }
+
+/* Standard visually-hidden-but-still-announced pattern: off-screen via
+   absolute positioning + clip, not display:none/visibility:hidden (those
+   remove an element from the accessibility tree, defeating an aria-live
+   region entirely). Used for #page-announcer, which exists purely to give
+   screen readers the current preview page's real text on navigation. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* Neither .btn's white text (for the plain Download button, disabled by
    default until required fields are filled) nor .btn.secondary's themed

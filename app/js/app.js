@@ -48,6 +48,7 @@
     els.fields = document.getElementById('fields');
     els.preview = document.getElementById('book-preview');
     els.pageLabel = document.getElementById('page-label');
+    els.pageAnnouncer = document.getElementById('page-announcer');
     els.prevBtn = document.getElementById('prev-page');
     els.nextBtn = document.getElementById('next-page');
     els.downloadBtn = document.getElementById('download-btn');
@@ -70,6 +71,21 @@
     // with no warning to either tab.
     window.addEventListener('storage', (e) => {
       if (e.key === STORAGE_KEY) checkForStorageConflict(e.oldValue, e.newValue);
+      // localStorage.clear() (as opposed to another tab's Start Over, which
+      // calls removeItem(STORAGE_KEY)) fires a storage event with
+      // key/oldValue/newValue ALL null per spec — a real, if less common,
+      // trigger (a "Clear site data" action, a privacy extension, DevTools)
+      // that the e.key === STORAGE_KEY filter above silently ignores
+      // entirely, the opposite of intent since a full clear is a MORE
+      // severe loss than the single-key removeItem case already handled.
+      // e.oldValue can't be reused here (also null, not this tab's own
+      // last-known content) — reuse the same "compare against what this tab
+      // itself would have saved" technique the bfcache/pageshow handler
+      // below already uses for the identical class of gap. Found by a
+      // fresh-eyes review 2026-07-25.
+      else if (e.key === null && state.storyType) {
+        checkForStorageConflict(ownLastSavedSnapshot(), null);
+      }
     });
     // Pages restored from the back-forward cache (bfcache) — e.g. clicking
     // the header logo to index.html, then hitting Back, a completely
@@ -85,13 +101,7 @@
     // the restore. Found by a fresh-eyes review 2026-07-24.
     window.addEventListener('pageshow', (e) => {
       if (!e.persisted || !state.storyType) return;
-      const ownLastSaved = JSON.stringify({
-        storyType: state.storyType,
-        answers: state.answers,
-        titleTouched: state.titleTouched,
-        previewIndex: state.previewIndex,
-      });
-      checkForStorageConflict(ownLastSaved, localStorage.getItem(STORAGE_KEY));
+      checkForStorageConflict(ownLastSavedSnapshot(), localStorage.getItem(STORAGE_KEY));
     });
     // Without this, a photo dropped anywhere on the page except squarely on
     // the small file-upload button falls through to the browser's own
@@ -215,11 +225,26 @@
     saveProgress();
   }
 
-  // Shared by the 'storage' listener (fires in other tabs on every write)
-  // and the 'pageshow'/bfcache-restore listener (which has no live event to
-  // read oldValue/newValue from, so it passes its own reconstructed
-  // last-known-saved JSON instead). oldValue/newValue are both raw JSON
-  // strings (or null), matching what a real StorageEvent provides.
+  // What saveProgress() would persist right now, as the same JSON string
+  // shape a real StorageEvent's oldValue/newValue carry. Used by two
+  // listeners that have no live event value to compare against: the
+  // pageshow/bfcache-restore handler (frozen tabs receive no events at all
+  // while frozen) and the storage listener's localStorage.clear() branch
+  // (a clear() event's own oldValue is null too, not this tab's content).
+  function ownLastSavedSnapshot() {
+    return JSON.stringify({
+      storyType: state.storyType,
+      answers: state.answers,
+      titleTouched: state.titleTouched,
+      previewIndex: state.previewIndex,
+    });
+  }
+
+  // Shared by the 'storage' listener (fires in other tabs on every write, or
+  // on a same-origin localStorage.clear()) and the 'pageshow'/bfcache-restore
+  // listener — both pass ownLastSavedSnapshot() when there's no live event
+  // value to read oldValue from. oldValue/newValue are both raw JSON strings
+  // (or null), matching what a real StorageEvent provides.
   function checkForStorageConflict(oldValue, newValue) {
     // Only warn if THIS tab actually has a story of its own that could be
     // lost — a fresh tab that never picked a story has nothing to
@@ -562,6 +587,18 @@
       } else {
         input = document.createElement('input');
         input.type = 'text';
+        // Every free-text field's box otherwise renders as a plain LTR
+        // paragraph (unicode-bidi:normal, text-align:start resolving to
+        // left) regardless of what's typed — a name/phrase in an
+        // RTL-dominant script (Arabic, Hebrew) then reads as left-aligned,
+        // the opposite of what a native reader of that script expects,
+        // even though the app already goes out of its way to correctly
+        // bidi-isolate the SAME text once it reaches the read-only preview
+        // label (2026-07-18). `dir="auto"` auto-detects direction from the
+        // field's own first strong-direction character with zero effect on
+        // ordinary Latin-script input. Found by a fresh-eyes live check
+        // 2026-07-26.
+        input.dir = 'auto';
         if (f.id === 'bookTitle') {
           const st = STORY_TYPES.find((s) => s.id === state.storyType);
           input.placeholder = (st && st.defaultTitle) || f.placeholder || '';
@@ -620,16 +657,27 @@
       // just one step earlier in the pipeline. Found by live testing
       // 2026-07-24, following up the same-day tab-separated-paste fix.
       if (f.id === 'parentsLabelCustom') {
-        input.addEventListener('paste', (e) => {
-          const clip = e.clipboardData || window.clipboardData;
-          const pasted = clip ? clip.getData('text/plain') : '';
-          if (!/[\r\n]/.test(pasted)) return;
+        // Dragging text (not just pasting it) into this field hits the exact
+        // same native newline-stripping-with-no-trace behavior the paste
+        // handler below exists to prevent — a plain <input>'s value
+        // sanitization applies identically whether the multi-line text
+        // arrives via Ctrl/Cmd-V or a native drag-and-drop (e.g. dragging
+        // two selected rows from a spreadsheet, or two lines from a Notes
+        // window, directly onto this field — an ordinary browser
+        // interaction). The window-level drop guard (see init() above) only
+        // ever prevents FILE drops outside the file input; it deliberately
+        // leaves ordinary text drops alone, so nothing else catches this.
+        // Both events expose the same raw pre-sanitization text via
+        // DataTransfer's getData('text/plain'), so one shared handler
+        // covers both. Found by a fresh-eyes review 2026-07-26.
+        const applyMultilineText = (e, rawText) => {
+          if (!/[\r\n]/.test(rawText)) return;
           e.preventDefault();
-          let sanitized = pasted.replace(/[\r\n]+/g, ', ');
+          let sanitized = rawText.replace(/[\r\n]+/g, ', ');
           const start = input.selectionStart;
           const end = input.selectionEnd;
-          const before = input.value.slice(0, start);
-          const after = input.value.slice(end);
+          let before = input.value.slice(0, start);
+          let after = input.value.slice(end);
           // A leading or trailing newline in the pasted text (a realistic
           // artifact — many apps include one when a whole line/column is
           // copied, e.g. "Grandma\nGrandpa\n") collapses to a dangling ", "
@@ -653,12 +701,36 @@
           // 2026-07-25, following up the same-day dangling-artifact trim
           // above (which alone doesn't fix this — it only ever removes
           // noise, it never restores a separator the trim itself removed).
-          const sepEnd = /[,;&/]\s*$/;
-          const sepStart = /^\s*[,;&/]/;
-          if (before && !sepEnd.test(before) && !sepStart.test(sanitized)) {
+          // The word "and" is just as valid a separator as ,;&/ — getParentsList()
+          // already treats it as one (`.replace(/\band\b/gi, ',')`), and this
+          // very function relies on that fact in its own comment above. Missing
+          // it here meant appending "Grandpa\n" right after already-typed
+          // "Grandma and " (a very natural thing to type) saw no separator at
+          // the boundary and inserted a redundant one, producing the visibly
+          // wrong, permanently-saved "Grandma and , Grandpa". Found by a
+          // fresh-eyes review 2026-07-26.
+          const sepEnd = /(?:[,;&/]|\band\b)\s*$/i;
+          const sepStart = /^\s*(?:[,;&/]|\band\b)/i;
+          // .trim() here, not bare truthiness — `before`/`after` made up
+          // ENTIRELY of whitespace (e.g. a single accidental space typed
+          // into an otherwise-empty field) is non-empty but has no real
+          // content to separate from. Testing raw truthiness inserted a
+          // synthetic separator next to nothing — e.g. a lone leading
+          // space plus a two-line paste produced ", Grandma, Grandpa"
+          // (stray leading comma), or trailing spaces after "Grandma"
+          // produced "Grandma, Aunt, Uncle, " (dangling trailing comma).
+          // Found by a fresh-eyes review 2026-07-26.
+          if (before.trim() && !sepEnd.test(before) && !sepStart.test(sanitized)) {
+            // Bare trailing whitespace with no real separator (e.g. a
+            // parent typed "Grandma " and paused) isn't itself a
+            // separator — trim it before inserting the synthetic ", " so
+            // the two don't glue into a stray "Grandma , Auntie" instead
+            // of "Grandma, Auntie". Found by a fresh-eyes review 2026-07-26.
+            before = before.replace(/[ \t]+$/, '');
             sanitized = ', ' + sanitized;
           }
-          if (after && !sepStart.test(after) && !sepEnd.test(sanitized)) {
+          if (after.trim() && !sepStart.test(after) && !sepEnd.test(sanitized)) {
+            after = after.replace(/^[ \t]+/, '');
             sanitized = sanitized + ', ';
           }
           const combined = before + sanitized + after;
@@ -672,9 +744,28 @@
           // PDF layout. Found by a fresh-eyes review 2026-07-24.
           const max = input.maxLength > 0 ? input.maxLength : combined.length;
           input.value = combined.slice(0, max);
-          const newPos = Math.min(start + sanitized.length, input.value.length);
+          // Derived from the (possibly trimmed) `before`/`sanitized`
+          // lengths rather than the original `start`, since trimming
+          // trailing whitespace off `before` above shifts where the
+          // inserted text actually lands.
+          const newPos = Math.min(before.length + sanitized.length, input.value.length);
           input.setSelectionRange(newPos, newPos);
           input.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        input.addEventListener('paste', (e) => {
+          const clip = e.clipboardData || window.clipboardData;
+          applyMultilineText(e, clip ? clip.getData('text/plain') : '');
+        });
+        // A native drop (unlike this app's own paste handler above, which
+        // intercepts before any browser insertion happens) would otherwise
+        // insert at wherever the browser judges the drop point to be, not
+        // necessarily the field's last-known selection — focusing first
+        // keeps this handler's insert-at-selection behavior consistent with
+        // the paste path rather than silently landing text somewhere the
+        // caret was never actually placed.
+        input.addEventListener('drop', (e) => {
+          input.focus();
+          applyMultilineText(e, e.dataTransfer ? e.dataTransfer.getData('text/plain') : '');
         });
       }
 
@@ -813,6 +904,13 @@
       const img = new Image();
       img.onerror = () => onError();
       img.onload = () => {
+        // A degenerate (0x0) image — e.g. an SVG with explicit width="0"
+        // height="0" — fires onload, not onerror, but Canvas's drawImage()
+        // silently no-ops on a zero-size source rect instead of throwing.
+        // Without this check, onDone() would fire with nothing but the
+        // opaque white fill below: a blank square baked onto the book's
+        // cover with no error shown anywhere.
+        if (img.width === 0 || img.height === 0) { onError(); return; }
         const size = 625;
         const canvas = document.createElement('canvas');
         canvas.width = size;
@@ -1102,7 +1200,11 @@
   // character this product's own copy already treats as supported (see
   // WINANSI_EXTRA below), so a parent typing "2 weeks…" hit the exact same
   // "a pet named Buddy…." glued-punctuation bug the ASCII case was fixed
-  // for. Only strips from the END of the string, so it's safe to apply even
+  // for. Also strips a trailing colon ("Sam:") — a plausible trailing-off
+  // typo that hit the identical glued-punctuation shape ("Sam:, ready for
+  // the world.") but was missed when the character class was first written.
+  // Found by a fresh-eyes review 2026-07-26. Only strips from the END of
+  // the string, so it's safe to apply even
   // to values that happen to already read fine (nothing to strip). Fields
   // that ARE shown as their own complete sentence (joyfulDetail, promise,
   // signOff) intentionally keep whatever punctuation the parent wrote.
@@ -1117,8 +1219,29 @@
   // whitespace) — "Maya , ready for the world." / "held Maya ." — the
   // exact "looks right in preview, wrong in the real PDF" failure mode
   // found live via a fresh-eyes review 2026-07-22.
+  //
+  // The trailing run being stripped can itself repeat as (whitespace +
+  // punctuation) more than once — e.g. "Maya! ." (an "!" a parent typed,
+  // then a "." added afterward with a stray space) or "Sam. !" — and the
+  // regex used to only match ONE such whitespace+punctuation cluster at
+  // the very end. "Maya! ." stripped only the trailing " .", leaving
+  // "Maya!" — still ending in punctuation — which then reproduced the
+  // exact glued-punctuation bug this function exists to prevent one
+  // splice later: "Maya!, ready for the world." on the baby-portrait page.
+  // Confirmed live in both the preview and a real downloaded PDF.
+  // Wrapping the whole (whitespace + punctuation-run) pattern in a group
+  // that itself repeats (rather than matching it once) consumes every
+  // such trailing cluster, however many there are, in one pass. Found by
+  // a fresh-eyes review 2026-07-26.
+  //
+  // The character class also covers straight and curly quote marks
+  // ("'"“”‘’) — a plausible paste artifact (a name copied out of a quoted
+  // document, or a trailing quote left over from "Maya") produced the same
+  // glued-punctuation bug this function exists to prevent: "Maya", ready
+  // for the world." Confirmed live and in a real downloaded PDF. Found by
+  // a fresh-eyes review 2026-07-26.
   function stripTrailingPunctuation(str) {
-    return str.replace(/\s*[.!?,;…]+$/, '');
+    return str.replace(/(?:\s*[.!?,;:…"'“”‘’]+)+$/, '');
   }
 
   // helperDetail/howCame are documented in prompts.js as short phrases meant
@@ -1214,8 +1337,16 @@
       ...(pet ? ['a pet named ' + pet] : []),
     ];
 
+    // Every page gets a stable `pageId`, distinct from `kind` — a semantic
+    // slot name (e.g. 'journey', 'joyfulDetail') that identifies WHICH page
+    // this is regardless of whether it's conditionally present, unlike kind
+    // (shared by several different 'text' pages) or content (which changes
+    // as answers change, and disappears entirely if the page is removed).
+    // renderPreview() uses this to re-anchor the viewer's position when a
+    // conditional page they were viewing gets removed by an edit elsewhere.
     const pages = [];
     pages.push({
+      pageId: 'title',
       kind: 'title',
       title: title,
       subtitle: 'A story for ' + name,
@@ -1225,6 +1356,7 @@
     });
 
     pages.push({
+      pageId: 'baby-portrait',
       kind: 'baby-portrait',
       label: 'Here I was!',
       text: name + ', ready for the world.',
@@ -1232,6 +1364,7 @@
     });
 
     pages.push({
+      pageId: 'opening',
       kind: 'text',
       label: 'Once upon a time…',
       // "there was"/"there were" must agree with how many members end up
@@ -1250,11 +1383,11 @@
       motif: 'moon-stars',
     });
 
-    pages.push({ kind: 'text', text: 'They loved their family, but something was missing!', motif: 'heart-outline' });
+    pages.push({ pageId: 'missing', kind: 'text', text: 'They loved their family, but something was missing!', motif: 'heart-outline' });
 
-    pages.push({ kind: 'text', label: 'Then, they had a great idea…', text: st.ideaLabel + '!', motif: 'lightbulb' });
+    pages.push({ pageId: 'idea', kind: 'text', label: 'Then, they had a great idea…', text: st.ideaLabel + '!', motif: 'lightbulb' });
 
-    pages.push({ kind: 'text', label: 'How ' + name + ' joined our family', text: buildOriginSentence(state.storyType, a, name, parentsPhrase), motif: 'house-heart' });
+    pages.push({ pageId: 'joined', kind: 'text', label: 'How ' + name + ' joined our family', text: buildOriginSentence(state.storyType, a, name, parentsPhrase), motif: 'house-heart' });
 
     // joyfulDetail/signOff are optional and shown verbatim (see the comment
     // above stripTrailingPunctuation — they intentionally keep whatever
@@ -1265,7 +1398,7 @@
     // entire content was "...", with no warning, in both the live preview
     // and the real downloaded PDF. Found by a fresh-eyes review 2026-07-24.
     if (a.joyfulDetail && stripTrailingPunctuation(a.joyfulDetail.trim())) {
-      pages.push({ kind: 'text', label: 'A joyful detail', text: a.joyfulDetail.trim(), motif: 'sparkle' });
+      pages.push({ pageId: 'joyfulDetail', kind: 'text', label: 'A joyful detail', text: a.joyfulDetail.trim(), motif: 'sparkle' });
     }
 
     // Kinship adoption's own origin sentence (buildOriginSentence) is built on
@@ -1331,7 +1464,7 @@
         closing = ' to bring ' + name + ' home.';
       else closing = ' to meet ' + name + '.';
       text += closing;
-      pages.push({ kind: 'text', label: 'The journey', text: text, motif: 'plane' });
+      pages.push({ pageId: 'journey', kind: 'text', label: 'The journey', text: text, motif: 'plane' });
     }
 
     let heldText;
@@ -1345,13 +1478,26 @@
       heldText = parentsPhrase + ' could hardly believe how blessed they were the very first time they held ' + name + '.';
     }
     pages.push({
+      pageId: 'held',
       kind: 'text',
       text: heldText,
       motif: 'heart',
     });
 
     if (siblings.length) {
+      // "So happy the wait was over" was re-flagged by a fresh-eyes review
+      // 2026-07-25 as another instance of the "unconditional page
+      // contradicts a path's own premise" class (Kinship/Blended/Foster
+      // care) — but this EXACT line has already been explicitly
+      // adjudicated defensible for every path on 2026-07-21, and
+      // re-confirmed (not re-litigated, since no new evidence was offered)
+      // on 2026-07-23 and 2026-07-24: "the wait" reads as the legal/
+      // finalization process ending, not a first-physical-meeting claim,
+      // so it holds even for a child who already lived with these
+      // siblings. Left unchanged again — see docs/roadmap.md for the full
+      // history if this gets re-flagged a 5th time.
       pages.push({
+        pageId: 'sibling-hug',
         kind: 'text',
         text: joinWithAnd(siblings) + ' could not stop hugging and kissing ' + name + ', so happy the wait was over!',
         motif: 'two-hearts',
@@ -1381,9 +1527,10 @@
     } else {
       headedHomeText = 'Then, everyone headed home, eager to share their happy news with the whole family!';
     }
-    pages.push({ kind: 'text', text: headedHomeText, motif: 'house' });
+    pages.push({ pageId: 'headed-home', kind: 'text', text: headedHomeText, motif: 'house' });
 
     pages.push({
+      pageId: 'family-portrait',
       kind: 'family-portrait',
       label: 'Our family',
       text: parentsPhrase + (siblings.length ? ', ' + joinWithAnd(siblings) : '') + ' — together with ' + name + ', always.',
@@ -1391,15 +1538,16 @@
     });
 
     if (a.promise && a.promise.trim()) {
-      pages.push({ kind: 'text', label: 'Our promise to you', text: a.promise.trim(), motif: 'heart' });
+      pages.push({ pageId: 'promise', kind: 'text', label: 'Our promise to you', text: a.promise.trim(), motif: 'heart' });
     }
 
     // Same punctuation-only guard as joyfulDetail above.
     if (a.signOff && stripTrailingPunctuation(a.signOff.trim())) {
-      pages.push({ kind: 'closing', text: a.signOff.trim(), motif: 'sparkle' });
+      pages.push({ pageId: 'signOff', kind: 'closing', text: a.signOff.trim(), motif: 'sparkle' });
     }
 
     pages.push({
+      pageId: 'final',
       kind: 'closing',
       text: 'Everyone has a story. This is yours — and it’s only the beginning.',
       motif: 'rainbow',
@@ -1411,7 +1559,12 @@
   function buildOriginSentence(storyTypeId, a, name, parentsPhrase) {
     if (storyTypeId === 'surrogacy') {
       const helper = a.helperTerm || 'surrogate';
-      return 'A ' + helper + ' carried ' + name + ' and kept ' + name + ' safe until it was time to meet ' + parentsPhrase + '.';
+      // Was "A [helper] carried [name]..." — with helperTerm set to its
+      // own "gestational carrier" option, that produced the awkward,
+      // typo-reading word collision "A gestational carrier carried
+      // Maya...". Reworded the verb so it reads cleanly for all three
+      // helperTerm options. Found by a fresh-eyes review 2026-07-26.
+      return 'A ' + helper + ' cared for ' + name + ' and kept ' + name + ' safe until it was time to meet ' + parentsPhrase + '.';
     }
     if (storyTypeId === 'ivf') {
       // A value made up entirely of punctuation (e.g. "...") is non-blank
@@ -1426,7 +1579,14 @@
       // named plainly here rather than folded silently into this detail
       // (see docs/family-language-review.md).
       if (a.donorInvolved === 'Yes — an egg or sperm donor') {
-        return parentsPhrase + ' wanted ' + name + ' so much — ' + detail + ', with a generous donor’s help, and then, there ' + name + ' was!';
+        // Was "...with a generous donor's help" — collided with the
+        // default `detail` fallback text itself ("a little help from
+        // science"), producing "...a little help from science, with a
+        // generous donor's help..." on every book that left helperDetail
+        // blank and picked this donor option — the same word-repetition
+        // shape as the surrogacy "gestational carrier carried" fix above.
+        // Found by real-PDF visual inspection 2026-07-26.
+        return parentsPhrase + ' wanted ' + name + ' so much — ' + detail + ', with support from a generous donor, and then, there ' + name + ' was!';
       }
       if (a.donorInvolved === 'Yes — a donor embryo') {
         return parentsPhrase + ' wanted ' + name + ' so much — ' + detail + ', and a donor’s generous gift of an embryo, and then, there ' + name + ' was!';
@@ -1458,32 +1618,32 @@
   function renderPreview() {
     // previewIndex is a raw array position, but buildPages() can insert/remove
     // pages earlier in the sequence as answers change (e.g. filling in a
-    // travel place inserts a "journey" page before the closing pages) — if we
-    // kept showing the same numeric index, the reader would silently see a
-    // *different* page's content swapped in mid-edit, with no navigation
-    // action of their own. Re-anchor to the same page by content identity
-    // when it still exists; only fall back to raw clamping when it's gone
-    // (e.g. the page they were viewing was itself just removed).
-    const previousPage = (state._lastRenderedPages || [])[state.previewIndex];
+    // travel place inserts a "journey" page before the closing pages), or
+    // rewrite a still-present page's own text (e.g. numSiblings changing
+    // "Our family"'s member list) — if we kept showing the same numeric
+    // index, the reader would silently see a *different* page's content
+    // swapped in mid-edit, with no navigation action of their own. Every
+    // page carries a stable `pageId` (buildPages(), above) precisely so this
+    // re-anchor doesn't depend on content that can itself change or vanish.
+    const previousPages = state._lastRenderedPages || [];
+    const previousPage = previousPages[state.previewIndex];
     const pages = buildPages();
     if (previousPage) {
-      let matchIndex = pages.findIndex(
-        (p) => p.kind === previousPage.kind && p.label === previousPage.label && p.text === previousPage.text
-      );
-      // numSiblings is the one field whose change can simultaneously shift
-      // page positions (removing/adding the sibling-hug page) AND rewrite
-      // the TEXT of a different, still-present page that mentions sibling
-      // names/count (e.g. "Our family" on the family-portrait page) — so
-      // the exact content match above fails even though the reader is still
-      // looking at conceptually the same page, and the raw numeric index
-      // (now pointing at whatever shifted into that slot) isn't out of
-      // bounds either, so it silently shows the wrong page. Found by a
-      // fresh-eyes review 2026-07-23. Fall back to matching by `kind` alone
-      // for the three kinds guaranteed to appear at most once per book
-      // (title/baby-portrait/family-portrait) — safe because there's never
-      // more than one to be ambiguous between, unlike 'text'/'closing'.
-      if (matchIndex === -1 && ['title', 'baby-portrait', 'family-portrait'].includes(previousPage.kind)) {
-        matchIndex = pages.findIndex((p) => p.kind === previousPage.kind);
+      let matchIndex = pages.findIndex((p) => p.pageId === previousPage.pageId);
+      // The previously-viewed page can be removed outright (e.g. clearing
+      // travelPlace/travelDuration while looking at "The journey" page) —
+      // no pageId match exists at all. Walk backward through the OLD page
+      // list for the nearest still-existing page and anchor there, so the
+      // reader lands as close as possible to where they were instead of
+      // wherever a later page happened to shift into their old numeric
+      // slot (silently showing unrelated content with no navigation action
+      // taken). Found by a fresh-eyes review 2026-07-25.
+      if (matchIndex === -1) {
+        for (let i = state.previewIndex - 1; i >= 0; i--) {
+          const candidateId = previousPages[i] && previousPages[i].pageId;
+          const idx = candidateId ? pages.findIndex((p) => p.pageId === candidateId) : -1;
+          if (idx !== -1) { matchIndex = idx; break; }
+        }
       }
       if (matchIndex !== -1) state.previewIndex = matchIndex;
     }
@@ -1707,6 +1867,24 @@
   function movePreview(delta) {
     state.previewIndex += delta;
     renderPreview();
+    // #page-label (set inside renderPreview()) only ever announces "Page X
+    // of Y — label", never the page's actual prose that a sighted reader
+    // sees update live in #book-preview. Read the just-rendered page back
+    // from state._lastRenderedPages (renderPreview() already re-anchored
+    // state.previewIndex to a valid entry) and announce its real content
+    // here specifically, not inside renderPreview() itself — that function
+    // also re-runs on every keystroke while editing a field, and announcing
+    // the whole page on every character typed would be disruptive chatter,
+    // not a fix. Found by a fresh-eyes review 2026-07-26.
+    const announcedPage = state._lastRenderedPages && state._lastRenderedPages[state.previewIndex];
+    if (announcedPage && els.pageAnnouncer) {
+      // The title page has no label/text — it has title/subtitle instead
+      // (see buildPages()'s 'title' entry and renderPreview()'s own
+      // page.kind === 'title' branch).
+      els.pageAnnouncer.textContent = announcedPage.kind === 'title'
+        ? announcedPage.title + '. ' + announcedPage.subtitle
+        : (announcedPage.label ? announcedPage.label + '. ' : '') + (announcedPage.text || '');
+    }
     saveProgress();
   }
 
