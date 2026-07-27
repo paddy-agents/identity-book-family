@@ -267,12 +267,32 @@
     // a fresh-eyes review 2026-07-24.
     let onlyIgnorableFieldsChanged = false;
     try {
+      // JSON.stringify is sensitive to object KEY INSERTION ORDER, not just
+      // deep value equality — and selectStoryType()'s field-clearing
+      // (delete state.answers[id], then renderFields() re-creates the key
+      // later on a switch back) reorders state.answers's keys without
+      // changing any actual value. Two tabs with byte-identical story
+      // content but different edit histories then compared as "different"
+      // here, firing a false "changed in another tab" warning on an
+      // ordinary "clicked through story types, came back" interaction —
+      // surviving all 8+ prior fixes to this function, since those all
+      // targeted spurious FIELD changes, not spurious key ORDERING on an
+      // otherwise-identical object. Sort keys recursively before comparing
+      // so ordering can't affect the result. Found by a fresh-eyes review
+      // 2026-07-27.
+      const stableStringify = (value) => {
+        if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']';
+        if (value && typeof value === 'object') {
+          return '{' + Object.keys(value).sort().map((k) => JSON.stringify(k) + ':' + stableStringify(value[k])).join(',') + '}';
+        }
+        return JSON.stringify(value);
+      };
       const normalizeForConflictCheck = (raw) => {
         if (!raw) return raw;
         const parsed = JSON.parse(raw);
         delete parsed.previewIndex;
         delete parsed.titleTouched;
-        return JSON.stringify(parsed);
+        return stableStringify(parsed);
       };
       onlyIgnorableFieldsChanged = normalizeForConflictCheck(oldValue) === normalizeForConflictCheck(newValue);
     } catch (err) {
@@ -378,6 +398,50 @@
     // cleared, not just relabeled, when the story type actually changes.
     if (state.storyType && state.storyType !== id) {
       delete state.answers.joyfulDetail;
+
+      // Every OTHER origin-field id (adoptionPath/birthParentTerm/
+      // helperTerm/helperDetail/donorInvolved/howCame/travelPlace/
+      // travelDuration) is exclusive to whichever story type(s) declare it
+      // in ORIGIN_FIELDS — renderFields() unconditionally writes a default
+      // value for every field of the CURRENT type the instant it's even
+      // looked at (not just typed into), so merely clicking a different
+      // story-type card to peek at it, then switching back, permanently
+      // left that type's exclusive fields (e.g. IVF's helperDetail/
+      // donorInvolved) sitting in state.answers/localStorage. Inert for the
+      // actual book/PDF (every consumer already gates correctly on
+      // storyType/adoptionPath), but a real, silent, unbounded
+      // accumulation of dead keys that also makes the cross-tab conflict
+      // check below flag an otherwise-meaningless diff.
+      //
+      // The first version of this fix (086969a, earlier today) deleted any
+      // OLD-type field the NEW type doesn't also declare, unconditionally —
+      // including fields the user had actually filled in, not just
+      // never-touched defaults. A fresh-eyes review caught a severe
+      // consequence: selecting Adoption, setting adoptionPath to "Foster
+      // care", peeking IVF (which has no adoptionPath field) and clicking
+      // back to Adoption silently reset adoptionPath to its default ("A
+      // birth parent chose us") — a completely different, FALSE narrative
+      // for the actual generated book, with zero visible warning. Losing a
+      // stray travelPlace string is a nuisance; losing which adoption path
+      // is true is a correctness bug this product's own design principles
+      // (docs/adoption-language-review.md) exist specifically to prevent.
+      //
+      // Only clear a field if its current value is STILL exactly what
+      // renderFields() auto-wrote (i.e. genuinely untouched) — this still
+      // closes the original dead-key case (helperDetail/donorInvolved never
+      // interacted with) without destroying anything the user actually
+      // chose or typed, even if they're just peeking at another type and
+      // come back. Trade-off accepted: a touched-then-abandoned-forever
+      // field can still leak as an inert dead key (the original, low-
+      // severity problem 086969a set out to fix) — preferred over silent
+      // narrative corruption. Found by a fresh-eyes review 2026-07-27.
+      const newFieldIds = new Set(getOriginFieldsFor(id).map((f) => f.id));
+      getOriginFieldsFor(state.storyType).forEach((f) => {
+        if (f.id === 'joyfulDetail' || newFieldIds.has(f.id)) return;
+        const current = state.answers[f.id];
+        const untouchedValue = f.default !== undefined ? f.default : '';
+        if (current === untouchedValue || current === undefined) delete state.answers[f.id];
+      });
     }
     state.storyType = id;
     state.previewIndex = 0;
@@ -455,6 +519,21 @@
         // written verbatim into the <select> (selectedIndex -1, blank display)
         // even though the sibling-name fields it generates are correctly capped.
         state.answers.numSiblings = String(n);
+        // Decreasing the count only ever stopped RENDERING the higher-index
+        // sibling fields — their old text stayed in state.answers/localStorage
+        // untouched. Raising the count back up then silently pre-filled the
+        // newly-revealed field with that stale, no-longer-relevant name (e.g.
+        // set to 3, type Alex/Beth/Cara, drop to 1, raise back to 2 — the
+        // second field reappears already containing "Beth"), indistinguishable
+        // in the UI from something the parent just typed, and it flows straight
+        // into the live preview and the downloaded PDF. Unlike the story-type
+        // field-clearing case, there's no "untouched vs. real" distinction to
+        // preserve here — the field simply doesn't exist anymore at this count,
+        // so clearing on every decrease is the safe default. Found by a
+        // fresh-eyes review 2026-07-27.
+        for (let i = n + 1; i <= maxSiblingCount(); i++) {
+          delete state.answers['siblingName' + i];
+        }
         for (let i = 1; i <= n; i++) {
           const sf = siblingField(i);
           clampTextFieldValue(sf);
@@ -504,6 +583,13 @@
   function renderFields() {
     ensureAvatarDefaults();
     const fields = getVisibleFields();
+    // Mirrors the isKinshipAdoption/isBlended/isFosterCare flags in
+    // buildPages() — used below to keep two FORM-facing strings (not just
+    // the generated book pages, which is where this bug class was
+    // previously fixed 8 times) from contradicting the same premise.
+    const isKinshipAdoption = state.storyType === 'adoption' && state.answers.adoptionPath === 'Kinship / relative adoption';
+    const isBlendedFamily = state.storyType === 'blended';
+    const isFosterCareAdoption = state.storyType === 'adoption' && state.answers.adoptionPath === 'Foster care';
     // renderFields() rebuilds every field element from scratch, which would
     // otherwise drop keyboard focus to <body> mid-interaction (e.g. right
     // after changing "how many siblings" or "parents label" — both of
@@ -527,7 +613,25 @@
       wrap.className = 'field';
 
       const label = document.createElement('label');
-      label.textContent = f.label + (f.required ? '' : ' (optional)');
+      // The static label "Where did you travel to meet your child?" directly
+      // contradicts the journey page's own generated text for 2 of adoption's
+      // 4 paths — Kinship/International already read "...to bring [name]
+      // home" and Foster care reads "...to be with [name]" specifically to
+      // avoid claiming a first meeting (see buildPages()'s isKinshipAdoption/
+      // isFosterCare handling) — yet the question collecting that very answer
+      // still asked about "meeting" the child for those same paths. Surrogacy
+      // has no path variance (buildOriginSentence's surrogacy branch always
+      // reads "...time to meet [parents]", so "meet" is accurate there) and
+      // keeps its static label. Found by a fresh-eyes review 2026-07-26.
+      let fieldLabel = f.label;
+      if (f.id === 'travelPlace' && state.storyType === 'adoption') {
+        if (isKinshipAdoption || state.answers.adoptionPath === 'International adoption') {
+          fieldLabel = 'Where did you travel to bring your child home?';
+        } else if (isFosterCareAdoption) {
+          fieldLabel = 'Where did you travel to be with your child?';
+        }
+      }
+      label.textContent = fieldLabel + (f.required ? '' : ' (optional)');
       // The avatar builder is a group of buttons/swatches, not one control
       // with a matching 'field-<id>' element — a `for` here would point at
       // nothing and orphan the label for screen readers and label clicks.
@@ -545,11 +649,24 @@
       // (rather than reading the page linearly) never hears it, since DOM
       // proximity to the label alone isn't enough to associate it.
       let hintId = null;
-      if (f.hint) {
+      // "...already waiting to meet this child" is the same "unconditional
+      // text contradicts a path's own premise" bug class fixed 8 times in
+      // buildPages() — Kinship adoption's own premise is "already loved" (a
+      // pre-existing relationship, not a first meeting), Blended family's is
+      // two already-existing families merging (no newborn "meeting" at all),
+      // and Foster care is deliberately non-committal about timing since the
+      // child may have already lived with these siblings for months or
+      // years. numSiblings has no showIf — this hint renders unchanged for
+      // every story type. Found by a fresh-eyes review 2026-07-26.
+      let fieldHint = f.hint;
+      if (f.id === 'numSiblings' && (isKinshipAdoption || isBlendedFamily || isFosterCareAdoption)) {
+        fieldHint = 'The brothers and sisters already part of this child’s life.';
+      }
+      if (fieldHint) {
         const hint = document.createElement('span');
         hint.className = 'hint';
         hint.id = 'field-' + f.id + '-hint';
-        hint.textContent = f.hint;
+        hint.textContent = fieldHint;
         wrap.appendChild(hint);
         hintId = hint.id;
       }
@@ -642,96 +759,123 @@
       }
       state.answers[f.id] = value;
 
-      // parentsLabelCustom is the one field that later gets SPLIT into
-      // multiple names — a real, realistic way to enter two names at once
-      // is pasting them from two stacked lines (a notes app, or two cells
-      // from a column instead of a row in a spreadsheet). Unlike a tab
-      // (already handled in sanitizeFieldValue()), the browser's own value
-      // sanitization algorithm for a single-line <input> STRIPS embedded
-      // newlines entirely — no space, no trace — before the 'input' event
-      // this app listens to ever fires, so "Grandma\nGrandpa" already
-      // arrives as "GrandmaGrandpa" with zero separator, unrecoverable
-      // after the fact. Intercepting the 'paste' event directly (which
-      // still exposes the raw, unsanitized clipboard text) is the only
-      // point this can still be caught — same fix shape as the tab case,
-      // just one step earlier in the pipeline. Found by live testing
-      // 2026-07-24, following up the same-day tab-separated-paste fix.
-      if (f.id === 'parentsLabelCustom') {
-        // Dragging text (not just pasting it) into this field hits the exact
-        // same native newline-stripping-with-no-trace behavior the paste
-        // handler below exists to prevent — a plain <input>'s value
-        // sanitization applies identically whether the multi-line text
-        // arrives via Ctrl/Cmd-V or a native drag-and-drop (e.g. dragging
-        // two selected rows from a spreadsheet, or two lines from a Notes
-        // window, directly onto this field — an ordinary browser
-        // interaction). The window-level drop guard (see init() above) only
-        // ever prevents FILE drops outside the file input; it deliberately
-        // leaves ordinary text drops alone, so nothing else catches this.
-        // Both events expose the same raw pre-sanitization text via
-        // DataTransfer's getData('text/plain'), so one shared handler
-        // covers both. Found by a fresh-eyes review 2026-07-26.
+      // A newline pasted or dropped into ANY single-line text field is
+      // silently stripped by the browser's own value-sanitization
+      // algorithm before any 'input' event fires — even a direct
+      // `.value =` assignment loses it with no trace (verified live:
+      // setting "I love you, Ava!\nXO, Mom" produces
+      // "I love you, Ava!XO, Mom", fusing the two lines with zero
+      // separator). Every prior fix here (2026-07-24 through 2026-07-26)
+      // only ever intercepted this for parentsLabelCustom, since that
+      // field's comma-based list-parsing was the immediate motivation —
+      // but the underlying browser behavior is universal, and a fused
+      // two-line paste is a real, visible defect in every other free-text
+      // field too (a two-line sign-off or pet name pasted from a Notes
+      // app, a title copied from two lines). Generalized to every text
+      // field: parentsLabelCustom keeps its existing comma-joining +
+      // separator-aware boundary logic (a real delimited list); every
+      // other field just joins with a single space (the natural word/line
+      // separator — no list-parsing concern for free prose). Found by a
+      // fresh-eyes live check 2026-07-26.
+      if (f.type !== 'select') {
+        const isParentsList = f.id === 'parentsLabelCustom';
+        // Dragging text (not just pasting it) hits the exact same native
+        // newline-stripping-with-no-trace behavior the paste handler below
+        // exists to prevent — a plain <input>'s value sanitization applies
+        // identically whether the multi-line text arrives via Ctrl/Cmd-V or
+        // a native drag-and-drop (e.g. dragging two selected rows from a
+        // spreadsheet, or two lines from a Notes window, directly onto this
+        // field — an ordinary browser interaction). The window-level drop
+        // guard (see init() above) only ever prevents FILE drops outside
+        // the file input; it deliberately leaves ordinary text drops alone,
+        // so nothing else catches this. Both events expose the same raw
+        // pre-sanitization text via DataTransfer's getData('text/plain'),
+        // so one shared handler covers both.
         const applyMultilineText = (e, rawText) => {
           if (!/[\r\n]/.test(rawText)) return;
           e.preventDefault();
-          let sanitized = rawText.replace(/[\r\n]+/g, ', ');
+          let sanitized = rawText.replace(/[\r\n]+/g, isParentsList ? ', ' : ' ');
           const start = input.selectionStart;
           const end = input.selectionEnd;
           let before = input.value.slice(0, start);
           let after = input.value.slice(end);
-          // A leading or trailing newline in the pasted text (a realistic
-          // artifact — many apps include one when a whole line/column is
-          // copied, e.g. "Grandma\nGrandpa\n") collapses to a dangling ", "
-          // at the edge of `sanitized`. When that side of the paste is
-          // genuinely empty, it's just stray noise — trim it so the
-          // visible box doesn't show leftover punctuation a parent might
-          // mistake for a real (and now-lost) entry.
-          if (before === '') sanitized = sanitized.replace(/^,\s*/, '');
-          if (after === '') sanitized = sanitized.replace(/,\s*$/, '');
-          // But when that side is NOT empty — e.g. appending "Auntie\n"
-          // right after already-typed "Grandma and Grandpa" — the artifact
-          // just trimmed above WAS the only thing standing between the old
-          // and new content; removing it (or never having one at all, for
-          // a paste with no boundary newline) fuses them into one garbled
-          // pseudo-name ("GrandpaAuntie") that getParentsList() can't
-          // split apart. Insert a real separator at the boundary whenever
-          // real content butts up against real content with none already
-          // there. Plain whitespace doesn't count as "already separated"
-          // here — getParentsList() only splits on ,&;/ or the word
-          // "and", not bare spaces. Found by a fresh-eyes review
-          // 2026-07-25, following up the same-day dangling-artifact trim
-          // above (which alone doesn't fix this — it only ever removes
-          // noise, it never restores a separator the trim itself removed).
-          // The word "and" is just as valid a separator as ,;&/ — getParentsList()
-          // already treats it as one (`.replace(/\band\b/gi, ',')`), and this
-          // very function relies on that fact in its own comment above. Missing
-          // it here meant appending "Grandpa\n" right after already-typed
-          // "Grandma and " (a very natural thing to type) saw no separator at
-          // the boundary and inserted a redundant one, producing the visibly
-          // wrong, permanently-saved "Grandma and , Grandpa". Found by a
-          // fresh-eyes review 2026-07-26.
-          const sepEnd = /(?:[,;&/]|\band\b)\s*$/i;
-          const sepStart = /^\s*(?:[,;&/]|\band\b)/i;
-          // .trim() here, not bare truthiness — `before`/`after` made up
-          // ENTIRELY of whitespace (e.g. a single accidental space typed
-          // into an otherwise-empty field) is non-empty but has no real
-          // content to separate from. Testing raw truthiness inserted a
-          // synthetic separator next to nothing — e.g. a lone leading
-          // space plus a two-line paste produced ", Grandma, Grandpa"
-          // (stray leading comma), or trailing spaces after "Grandma"
-          // produced "Grandma, Aunt, Uncle, " (dangling trailing comma).
-          // Found by a fresh-eyes review 2026-07-26.
-          if (before.trim() && !sepEnd.test(before) && !sepStart.test(sanitized)) {
-            // Bare trailing whitespace with no real separator (e.g. a
-            // parent typed "Grandma " and paused) isn't itself a
-            // separator — trim it before inserting the synthetic ", " so
-            // the two don't glue into a stray "Grandma , Auntie" instead
-            // of "Grandma, Auntie". Found by a fresh-eyes review 2026-07-26.
-            before = before.replace(/[ \t]+$/, '');
-            sanitized = ', ' + sanitized;
-          }
-          if (after.trim() && !sepStart.test(after) && !sepEnd.test(sanitized)) {
-            after = after.replace(/^[ \t]+/, '');
-            sanitized = sanitized + ', ';
+          if (isParentsList) {
+            // A leading or trailing newline in the pasted text (a realistic
+            // artifact — many apps include one when a whole line/column is
+            // copied, e.g. "Grandma\nGrandpa\n") collapses to a dangling ", "
+            // at the edge of `sanitized`. When that side of the paste is
+            // genuinely empty, it's just stray noise — trim it so the
+            // visible box doesn't show leftover punctuation a parent might
+            // mistake for a real (and now-lost) entry.
+            if (before === '') sanitized = sanitized.replace(/^,\s*/, '');
+            if (after === '') sanitized = sanitized.replace(/,\s*$/, '');
+            // But when that side is NOT empty — e.g. appending "Auntie\n"
+            // right after already-typed "Grandma and Grandpa" — the artifact
+            // just trimmed above WAS the only thing standing between the old
+            // and new content; removing it (or never having one at all, for
+            // a paste with no boundary newline) fuses them into one garbled
+            // pseudo-name ("GrandpaAuntie") that getParentsList() can't
+            // split apart. Insert a real separator at the boundary whenever
+            // real content butts up against real content with none already
+            // there. Plain whitespace doesn't count as "already separated"
+            // here — getParentsList() only splits on ,&;/ or the word
+            // "and", not bare spaces. Found by a fresh-eyes review
+            // 2026-07-25, following up the same-day dangling-artifact trim
+            // above (which alone doesn't fix this — it only ever removes
+            // noise, it never restores a separator the trim itself removed).
+            // The word "and" is just as valid a separator as ,;&/ — getParentsList()
+            // already treats it as one (`.replace(/\band\b/gi, ',')`), and this
+            // very function relies on that fact in its own comment above. Missing
+            // it here meant appending "Grandpa\n" right after already-typed
+            // "Grandma and " (a very natural thing to type) saw no separator at
+            // the boundary and inserted a redundant one, producing the visibly
+            // wrong, permanently-saved "Grandma and , Grandpa". Found by a
+            // fresh-eyes review 2026-07-26.
+            const sepEnd = /(?:[,;&/]|\band\b)\s*$/i;
+            const sepStart = /^\s*(?:[,;&/]|\band\b)/i;
+            // .trim() here, not bare truthiness — `before`/`after` made up
+            // ENTIRELY of whitespace (e.g. a single accidental space typed
+            // into an otherwise-empty field) is non-empty but has no real
+            // content to separate from. Testing raw truthiness inserted a
+            // synthetic separator next to nothing — e.g. a lone leading
+            // space plus a two-line paste produced ", Grandma, Grandpa"
+            // (stray leading comma), or trailing spaces after "Grandma"
+            // produced "Grandma, Aunt, Uncle, " (dangling trailing comma).
+            // Found by a fresh-eyes review 2026-07-26.
+            if (before.trim() && !sepEnd.test(before) && !sepStart.test(sanitized)) {
+              // Bare trailing whitespace with no real separator (e.g. a
+              // parent typed "Grandma " and paused) isn't itself a
+              // separator — trim it before inserting the synthetic ", " so
+              // the two don't glue into a stray "Grandma , Auntie" instead
+              // of "Grandma, Auntie". Found by a fresh-eyes review 2026-07-26.
+              before = before.replace(/[ \t]+$/, '');
+              sanitized = ', ' + sanitized;
+            } else if (sepEnd.test(before) && !/\s$/.test(before)) {
+              // `before` already ends in a real separator ("Grandma," or
+              // "Grandma and") but with no trailing space — e.g. the caret
+              // sits right after the comma. Skipping insertion entirely (the
+              // branch above) is correct — a second ", " would double up the
+              // punctuation ("Grandma,, Cousin") — but leaving it as-is glues
+              // the pasted text directly onto the existing punctuation
+              // ("Grandma,Cousin"). Add just the missing space. Found by a
+              // fresh-eyes review 2026-07-26.
+              before = before + ' ';
+            }
+            if (after.trim() && !sepStart.test(after) && !sepEnd.test(sanitized)) {
+              after = after.replace(/^[ \t]+/, '');
+              sanitized = sanitized + ', ';
+            } else if (sepStart.test(after) && !/^\s/.test(after)) {
+              // Symmetric case: `after` already starts with a separator but
+              // has no leading space (e.g. the caret sits right before
+              // "&Grandpa"). Found by a fresh-eyes review 2026-07-26.
+              after = ' ' + after;
+            }
+          } else {
+            // General free-text field: there's no delimited-list semantics
+            // to preserve, just avoid an accidental double space where the
+            // paste lands right next to already-existing whitespace.
+            if (before === '' || /\s$/.test(before)) sanitized = sanitized.replace(/^ /, '');
+            if (after === '' || /^\s/.test(after)) sanitized = sanitized.replace(/ $/, '');
           }
           const combined = before + sanitized + after;
           // Programmatically assigning .value (unlike typing or a native
@@ -739,7 +883,7 @@
           // the browser only enforces that on user-driven edits. Without
           // this slice, a multi-line paste (several caregiver names, one
           // per line — the exact scenario this handler exists for) could
-          // silently blow straight past the field's own 80-char cap, the
+          // silently blow straight past the field's own maxLength, the
           // same safety net every other field's input relies on to bound
           // PDF layout. Found by a fresh-eyes review 2026-07-24.
           const max = input.maxLength > 0 ? input.maxLength : combined.length;
@@ -1222,17 +1366,13 @@
   //
   // The trailing run being stripped can itself repeat as (whitespace +
   // punctuation) more than once — e.g. "Maya! ." (an "!" a parent typed,
-  // then a "." added afterward with a stray space) or "Sam. !" — and the
-  // regex used to only match ONE such whitespace+punctuation cluster at
-  // the very end. "Maya! ." stripped only the trailing " .", leaving
-  // "Maya!" — still ending in punctuation — which then reproduced the
-  // exact glued-punctuation bug this function exists to prevent one
-  // splice later: "Maya!, ready for the world." on the baby-portrait page.
-  // Confirmed live in both the preview and a real downloaded PDF.
-  // Wrapping the whole (whitespace + punctuation-run) pattern in a group
-  // that itself repeats (rather than matching it once) consumes every
-  // such trailing cluster, however many there are, in one pass. Found by
-  // a fresh-eyes review 2026-07-26.
+  // then a "." added afterward with a stray space) or "Sam. !" — a regex
+  // that only matches ONE such whitespace+punctuation cluster at the very
+  // end would strip only the trailing " .", leaving "Maya!" — still ending
+  // in punctuation — which reproduces the exact glued-punctuation bug this
+  // function exists to prevent one splice later: "Maya!, ready for the
+  // world." on the baby-portrait page. Confirmed live in both the preview
+  // and a real downloaded PDF. Found by a fresh-eyes review 2026-07-26.
   //
   // The character class also covers straight and curly quote marks
   // ("'"“”‘’) — a plausible paste artifact (a name copied out of a quoted
@@ -1240,8 +1380,46 @@
   // glued-punctuation bug this function exists to prevent: "Maya", ready
   // for the world." Confirmed live and in a real downloaded PDF. Found by
   // a fresh-eyes review 2026-07-26.
+  //
+  // An EARLIER version of this fix wrapped the whole (whitespace +
+  // punctuation-run) pattern in a group that itself repeats —
+  // `(?:\s*[...]+)+$` — to consume every such trailing cluster in one
+  // pass. That introduced a severe ReDoS (catastrophic regex
+  // backtracking): a nested quantifier where the inner alternative can
+  // also be satisfied one character at a time, wrapped in an outer `+`,
+  // is exponential-time on a long homogeneous run that doesn't reach the
+  // true string end (measured: a 31-character pathological string — well
+  // under this function's callers' own maxLength caps — took over 90
+  // seconds; each additional character multiplies the time roughly 7x).
+  // Since renderPreview() (which calls this indirectly via buildPages())
+  // runs on every keystroke, a single such value in ANY covered field
+  // would freeze the tab on every subsequent interaction anywhere in the
+  // form, not just edits to that field. A single flat character class
+  // combining whitespace and punctuation has no such ambiguity (there's
+  // only one way to partition a flat `+` match) and is linear-time, and is
+  // behaviorally identical here because every call site passes an
+  // already-`.trim()`ed string — the true end of the string is guaranteed
+  // non-whitespace, so the flat class can never strip a "trailing"
+  // whitespace-only run the nested version wouldn't also have stripped
+  // (nested requires each cluster to end in punctuation, but any bare
+  // trailing whitespace was already removed by `.trim()` before this
+  // function ever sees it). Found by a fresh-eyes review 2026-07-26.
+  // This function's own extensive fix history (above) only ever addressed
+  // the TRAILING side — but the quote-mark case it was extended to cover
+  // (2026-07-26, "a name copied out of a quoted document") is exactly the
+  // scenario most likely to leave a matching LEADING quote too, since
+  // quotes come in pairs. A leading `"` with no matching leading-strip
+  // survived untouched and got spliced verbatim into nearly every page —
+  // `"Zoe` instead of `Zoe` — passing allRequiredFilled()'s own check
+  // (stripTrailingPunctuation('"Zoe') is still truthy) with no warning.
+  // Reuses the same flat, non-nested character class as the trailing
+  // strip (see the ReDoS note above) for the same linear-time reason;
+  // anchored to the start instead of the end. Found by a fresh-eyes
+  // review 2026-07-27.
   function stripTrailingPunctuation(str) {
-    return str.replace(/(?:\s*[.!?,;:…"'“”‘’]+)+$/, '');
+    return str
+      .replace(/[\s.!?,;:…"'“”‘’]+$/, '')
+      .replace(/^[\s.!?,;:…"'“”‘’]+/, '');
   }
 
   // helperDetail/howCame are documented in prompts.js as short phrases meant
@@ -1337,6 +1515,18 @@
       ...(pet ? ['a pet named ' + pet] : []),
     ];
 
+    // Kinship adoption's own origin sentence (buildOriginSentence) is built on
+    // an "already loved [name]" premise — a pre-existing relationship, not a
+    // first meeting. Blended family's premise is two already-existing families
+    // merging as the child grows, not a newborn/first-arrival scene. Foster
+    // care is deliberately non-committal about timing since the child may
+    // have already lived with the family for months or years. Computed here
+    // (before the baby-portrait page below, which needs it too) since the
+    // held/journey/headed-home pages further down also need it.
+    const isKinshipAdoption = state.storyType === 'adoption' && a.adoptionPath === 'Kinship / relative adoption';
+    const isBlended = state.storyType === 'blended';
+    const isFosterCare = state.storyType === 'adoption' && a.adoptionPath === 'Foster care';
+
     // Every page gets a stable `pageId`, distinct from `kind` — a semantic
     // slot name (e.g. 'journey', 'joyfulDetail') that identifies WHICH page
     // this is regardless of whether it's conditionally present, unlike kind
@@ -1355,11 +1545,16 @@
       useAvatar: !a.childPhoto,
     });
 
+    // "[name], ready for the world" reads as a newborn/first-arrival scene —
+    // the same "unconditional page contradicts a path's own premise" class
+    // already fixed for the held/journey/headed-home pages below, just on
+    // the one page with an actual baby illustration. Found by a fresh-eyes
+    // review 2026-07-26.
     pages.push({
       pageId: 'baby-portrait',
       kind: 'baby-portrait',
-      label: 'Here I was!',
-      text: name + ', ready for the world.',
+      label: (isKinshipAdoption || isBlended || isFosterCare) ? ('Meet ' + name + '!') : 'Here I was!',
+      text: (isKinshipAdoption || isBlended || isFosterCare) ? 'The heart of this story.' : (name + ', ready for the world.'),
       motif: 'sparkle',
     });
 
@@ -1401,6 +1596,11 @@
       pages.push({ pageId: 'joyfulDetail', kind: 'text', label: 'A joyful detail', text: a.joyfulDetail.trim(), motif: 'sparkle' });
     }
 
+    // isKinshipAdoption/isBlended/isFosterCare are computed earlier now (see
+    // the baby-portrait page above), since that page needed them too — the
+    // "held for the first time" contradiction described below applies
+    // equally to it.
+    //
     // Kinship adoption's own origin sentence (buildOriginSentence) is built on
     // an "already loved [name]" premise — a pre-existing relationship, not a
     // first meeting — so "the very first time they held [name]" directly
@@ -1418,11 +1618,7 @@
     // timing because a foster-to-adopt family may have already had the child
     // living with them — often for months or years — well before this "held
     // for the first time" page, which many real foster-adoptive families
-    // would read as simply untrue. Computed here (before the travel page
-    // below) since all three paths need it there too.
-    const isKinshipAdoption = state.storyType === 'adoption' && a.adoptionPath === 'Kinship / relative adoption';
-    const isBlended = state.storyType === 'blended';
-    const isFosterCare = state.storyType === 'adoption' && a.adoptionPath === 'Foster care';
+    // would read as simply untrue.
 
     // travelPlace/travelDuration only exist in the adoption & surrogacy forms.
     // Switching story types doesn't clear state.answers (so shared fields like

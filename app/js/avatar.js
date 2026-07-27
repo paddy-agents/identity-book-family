@@ -100,6 +100,21 @@
       ctx.closePath();
       ctx.fill();
     }
+    if (style === 'long' || style === 'pigtails') {
+      // Every other hair-fill contrast fix (blonde, gray) was verified only
+      // against the theme's SOFT card background — but the 'long' ellipses
+      // and 'pigtails' bumps reach down past the baby scene's swaddle
+      // boundary (cy + r*0.35) and get painted directly over theme.WARM
+      // instead, where warm-toned hair colors (blonde/gray/red, even brown)
+      // collapse to as low as ~1.4:1 contrast (need 3:1) — nearly invisible
+      // against the swaddle. Hair has no stroke elsewhere by design (fill
+      // alone normally carries enough contrast), but these two styles need
+      // one specifically for this reason — reusing the same dark stroke
+      // color already proven >=3:1 against every SOFT and WARM value in
+      // drawFace's own head-outline. Found by a fresh-eyes review 2026-07-27.
+      ctx.strokeStyle = '#4a3626';
+      ctx.lineWidth = Math.max(1, r * 0.025);
+    }
     if (style === 'long') {
       // Scaled to keep the farthest point of these ellipses within ~0.95 of
       // the 0.5*size circular clip callers apply (see drawFace's r comment) —
@@ -111,6 +126,7 @@
         ctx.beginPath();
         ctx.ellipse(cx + side * r * 0.75, cy + r * 0.42, r * 0.24, r * 0.65, 0, 0, Math.PI * 2);
         ctx.fill();
+        ctx.stroke();
       });
     }
     if (style === 'pigtails') {
@@ -129,6 +145,7 @@
         ctx.beginPath();
         ctx.arc(cx + side * r * 1.05, cy + r * 0.25, r * 0.3, 0, Math.PI * 2);
         ctx.fill();
+        ctx.stroke();
       });
     }
     if (style === 'bun') {

@@ -333,14 +333,17 @@ function getFieldsFor(storyTypeId) {
   return [...FAMILY_FIELDS, ...getOriginFieldsFor(storyTypeId), ...CLOSING_FIELDS];
 }
 
+function maxSiblingCount() {
+  return Math.max(...FAMILY_FIELDS.find((f) => f.id === 'numSiblings').options.map(Number));
+}
+
 // Clamps a raw numSiblings value into the range the field's own <select>
 // actually offers. Without this, an out-of-range value (e.g. hand-edited or
 // corrupted localStorage) generates one sibling-name field per count with no
 // upper bound — a real, reachable failure mode since numSiblings is read
 // straight from saved state, not re-validated against the select options.
 function clampSiblingCount(raw) {
-  const max = Math.max(...FAMILY_FIELDS.find((f) => f.id === 'numSiblings').options.map(Number));
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0) return 0;
-  return Math.min(n, max);
+  return Math.min(n, maxSiblingCount());
 }
