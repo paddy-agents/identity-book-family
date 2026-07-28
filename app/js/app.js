@@ -15,6 +15,16 @@
   // more recent choice once it finally resolves.
   const photoUploadSeq = {};
 
+  // Tracks, per photo field id, whether the last upload attempt for it ended
+  // in the "not a usable image" error banner. Purely ephemeral DOM state
+  // (errorMsg.hidden) with nothing recording it in state.answers used to mean
+  // any unrelated renderFields() rebuild (changing numSiblings/parentsLabel/
+  // adoptionPath, or an async photo crop finishing) silently discarded the
+  // banner -- the parent lost the only signal their photo never made it in,
+  // with the download left unblocked (photo is optional) since nothing else
+  // shows a broken state. Found by a fresh-eyes review 2026-07-28.
+  const photoUploadErrorShown = {};
+
   // True from the moment Download disables its button until buildAndSaveDoc()
   // finishes (two requestAnimationFrame callbacks later — see downloadBook()).
   // A blocking confirm()/alert() dialog pauses queued rAF callbacks along with
@@ -166,8 +176,19 @@
     // otherwise reload unsanitized and carry the same "looks fine on screen,
     // wrong in the PDF" bug straight through to a download without the
     // parent ever having typed anything unusual this session.
+    // A non-string answer value (corrupted/hand-edited storage — e.g. a
+    // number where text was expected) isn't just "unsanitized," it's a
+    // landmine: every downstream consumer (buildPages/getParentsList/
+    // getSiblingNames/etc.) calls .trim()/.replace() on answer values
+    // unconditionally and would throw the first time it touched this key,
+    // silently killing the entire preview/download pipeline with no error
+    // shown to the parent. Delete it instead so each field's own existing
+    // fallback (e.g. childName's `|| 'your child'`) applies, the same as if
+    // the key had never been set.
     Object.keys(state.answers).forEach((k) => {
-      if (typeof state.answers[k] === 'string') state.answers[k] = sanitizeFieldValue(k, state.answers[k]);
+      const v = state.answers[k];
+      if (typeof v === 'string') state.answers[k] = sanitizeFieldValue(k, v);
+      else if (typeof v !== 'object' || v === null || Array.isArray(v)) delete state.answers[k];
     });
     state.titleTouched = !!saved.titleTouched;
     // Guard against corrupted/hand-edited localStorage: a non-numeric value
@@ -195,7 +216,7 @@
     // even though the form was otherwise fully usable under the same
     // fallback. Found by a fresh-eyes review 2026-07-24.
     state.storyType = restoredStoryType.id;
-    if (!state.titleTouched || !state.answers.bookTitle) {
+    if (!state.titleTouched || state.answers.bookTitle === undefined) {
       state.answers.bookTitle = restoredStoryType.defaultTitle;
     }
 
@@ -292,6 +313,27 @@
         const parsed = JSON.parse(raw);
         delete parsed.previewIndex;
         delete parsed.titleTouched;
+        // selectStoryType()'s field-clearing (see its own comment) only
+        // clears a story-type-exclusive field if the value is still exactly
+        // the auto-populated default — a touched-then-abandoned field (e.g.
+        // peeking IVF, typing into helperDetail, then switching back to
+        // Adoption) deliberately survives as an inert dead key in `answers`,
+        // since every real CONSUMER of these fields already gates on
+        // storyType/adoptionPath. But comparing raw `answers` objects here
+        // treated that inert leak as a genuine difference, firing a false
+        // "changed in another open tab" warning for an edit that produces a
+        // byte-identical rendered book. Strip any answer id that isn't
+        // valid for the payload's OWN storyType before comparing — dynamic
+        // sibling-name fields aren't part of getFieldsFor()'s static list
+        // (see its own comment) so they're allowed through explicitly.
+        // Found by a fresh-eyes review 2026-07-28.
+        if (parsed.answers && typeof parsed.answers === 'object') {
+          const validIds = new Set(getFieldsFor(parsed.storyType).map((f) => f.id));
+          for (let i = 1; i <= maxSiblingCount(); i++) validIds.add('siblingName' + i);
+          Object.keys(parsed.answers).forEach((k) => {
+            if (!validIds.has(k)) delete parsed.answers[k];
+          });
+        }
         return stableStringify(parsed);
       };
       onlyIgnorableFieldsChanged = normalizeForConflictCheck(oldValue) === normalizeForConflictCheck(newValue);
@@ -355,6 +397,7 @@
     // into the answers we just cleared — same guard buildPhotoUpload's own
     // "Remove photo" button uses for one field, applied to all of them here.
     Object.keys(photoUploadSeq).forEach((id) => { photoUploadSeq[id] = (photoUploadSeq[id] || 0) + 1; });
+    Object.keys(photoUploadErrorShown).forEach((id) => { photoUploadErrorShown[id] = false; });
     [...els.storyTypes.children].forEach((card) => {
       card.classList.remove('selected');
       card.setAttribute('aria-pressed', 'false');
@@ -439,7 +482,15 @@
       getOriginFieldsFor(state.storyType).forEach((f) => {
         if (f.id === 'joyfulDetail' || newFieldIds.has(f.id)) return;
         const current = state.answers[f.id];
-        const untouchedValue = f.default !== undefined ? f.default : '';
+        // Mirror getVisibleFields()'s own select-field fallback (f.default
+        // || f.options[0]) exactly -- every select field currently defines
+        // an explicit default so this never diverges from the simpler `''`
+        // fallback in practice, but a future select field added without one
+        // would otherwise never be recognized as "untouched" and leak as a
+        // dead key forever. Found by a fresh-eyes review 2026-07-27.
+        const untouchedValue = f.default !== undefined
+          ? f.default
+          : (f.type === 'select' && f.options ? f.options[0] : '');
         if (current === untouchedValue || current === undefined) delete state.answers[f.id];
       });
     }
@@ -452,7 +503,7 @@
     });
 
     const st = STORY_TYPES.find((s) => s.id === id);
-    if (!state.titleTouched || !state.answers.bookTitle) {
+    if (!state.titleTouched || state.answers.bookTitle === undefined) {
       state.answers.bookTitle = st.defaultTitle;
     }
 
@@ -560,6 +611,28 @@
   // aria-pressed="false", desyncing the visible "nothing chosen" UI from the
   // avatar actually being drawn (and that will end up in the PDF). Found by a
   // fresh-eyes review 2026-07-24.
+  // childPhoto is always written by cropPhotoToSquare() as a
+  // canvas.toDataURL('image/jpeg', ...) string — every OTHER stateful field
+  // (previewIndex, numSiblings, storyType, select options, childAvatar's own
+  // sub-keys, text-field maxLength) is validated against its known-good
+  // shape on restore from localStorage, but childPhoto was only ever checked
+  // for truthiness. A corrupted/hand-edited value (same threat model as
+  // every guard above) reaches buildPages() as `useAvatar: false` with a
+  // garbage `photo` string, so both the live preview and the real PDF show a
+  // permanently broken image instead of falling back to the avatar the app
+  // otherwise always guarantees when no valid photo exists. Found by a
+  // fresh-eyes review 2026-07-27.
+  // Restricted to image/jpeg (not image/* generally) because buildAndSaveDoc()
+  // unconditionally passes 'JPEG' to jsPDF's addImage() whenever a photo is
+  // present -- a well-formed but non-JPEG data URL (e.g. hand-edited storage
+  // holding a valid PNG) would pass a looser check, render fine in the live
+  // <img> preview, then silently fail to decode in the PDF (caught by the
+  // existing try/catch, so no crash, just a missing photo with no visible
+  // preview/PDF divergence warning). Found by a fresh-eyes review 2026-07-28.
+  function isValidPhotoDataUrl(value) {
+    return typeof value === 'string' && /^data:image\/jpeg;base64,/i.test(value);
+  }
+
   function ensureAvatarDefaults() {
     if (!state.answers.childAvatar || typeof state.answers.childAvatar !== 'object') {
       state.answers.childAvatar = Object.assign({}, AvatarKit.DEFAULT_AVATAR);
@@ -794,7 +867,17 @@
         const applyMultilineText = (e, rawText) => {
           if (!/[\r\n]/.test(rawText)) return;
           e.preventDefault();
-          let sanitized = rawText.replace(/[\r\n]+/g, isParentsList ? ', ' : ' ');
+          // Consume horizontal whitespace immediately touching the newline
+          // run, not just the newline itself — a very common real-world
+          // clipboard artifact (a trailing space before the line break, from
+          // Notes apps / email signatures / spreadsheet cells) otherwise
+          // survives INSIDE `sanitized` and collides with the substituted
+          // separator, baking a literal double space into the field. Looks
+          // completely correct in the live preview (HTML collapses
+          // whitespace) but renders as a visibly wider gap in the real
+          // downloaded PDF, where jsPDF's doc.text() does not collapse it.
+          // Found by a fresh-eyes review 2026-07-28.
+          let sanitized = rawText.replace(/[ \t]*[\r\n]+[ \t]*/g, isParentsList ? ', ' : ' ');
           const start = input.selectionStart;
           const end = input.selectionEnd;
           let before = input.value.slice(0, start);
@@ -949,6 +1032,14 @@
   function buildPhotoUpload(f, hintId) {
     const uploadWrap = document.createElement('div');
     uploadWrap.className = 'photo-upload';
+    // A corrupted/hand-edited stored value (same threat model as every other
+    // restore guard) would otherwise show a permanently broken image icon
+    // with no way to recover except "Remove photo" — drop it silently and
+    // fall through to the no-photo/avatar state instead, same as
+    // buildPages()'s own guard.
+    if (state.answers[f.id] && !isValidPhotoDataUrl(state.answers[f.id])) {
+      delete state.answers[f.id];
+    }
     const current = state.answers[f.id];
 
     const thumb = document.createElement('img');
@@ -962,7 +1053,11 @@
     errorMsg.className = 'photo-upload-error';
     errorMsg.id = 'field-' + f.id + '-error';
     errorMsg.setAttribute('role', 'alert');
-    errorMsg.hidden = true;
+    // Reflects whatever the last upload attempt for this field actually did
+    // (see photoUploadErrorShown's own comment) rather than always starting
+    // hidden — otherwise any unrelated renderFields() rebuild while an error
+    // is showing would silently discard it.
+    errorMsg.hidden = !photoUploadErrorShown[f.id];
     errorMsg.textContent = "That file couldn't be used as a photo — please try a JPG or PNG image.";
 
     const fileInput = document.createElement('input');
@@ -974,6 +1069,7 @@
       const file = fileInput.files && fileInput.files[0];
       if (!file) return;
       errorMsg.hidden = true;
+      photoUploadErrorShown[f.id] = false;
       const mySeq = (photoUploadSeq[f.id] = (photoUploadSeq[f.id] || 0) + 1);
       // Disable Download for the duration of this crop — see
       // pendingPhotoUploads' own comment for why.
@@ -1003,6 +1099,7 @@
           // silently produced no visible error at all.
           const liveInput = document.getElementById('field-' + f.id);
           const liveError = document.getElementById('field-' + f.id + '-error');
+          photoUploadErrorShown[f.id] = true;
           if (liveInput) liveInput.value = '';
           if (liveError) liveError.hidden = false;
           renderPreview();
@@ -1022,6 +1119,7 @@
       // Invalidate any still-in-flight upload for this field so it can't
       // resolve after the removal and silently bring the photo back.
       photoUploadSeq[f.id] = (photoUploadSeq[f.id] || 0) + 1;
+      photoUploadErrorShown[f.id] = false;
       delete state.answers[f.id];
       renderFields();
       renderPreview();
@@ -1292,13 +1390,6 @@
     };
   }
 
-  function withIndefiniteArticle(word) {
-    // Strip accents before testing so names like "Émile"/"Óscar" get "an",
-    // not just plain-ASCII vowel starters.
-    const plain = word.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    return (/^[aeiou]/i.test(plain) ? 'an ' : 'a ') + word;
-  }
-
   // The book's shared page.text/page.label strings mix plain English prose
   // with whatever a parent typed (e.g. an Arabic or Hebrew name). Two
   // separate, preview-only display fixes for that combination:
@@ -1416,10 +1507,20 @@
   // strip (see the ReDoS note above) for the same linear-time reason;
   // anchored to the start instead of the end. Found by a fresh-eyes
   // review 2026-07-27.
+  //
+  // The character class was missing hyphens/dashes (-, en dash –, em
+  // dash —) despite this app's own copy using em dashes routinely (the
+  // "journey" page builds '... traveled — ' + duration + ' of waiting
+  // and love ...'). A trailing/leading dash is a plausible paste
+  // artifact (a name copied out of a bulleted list, "- Biscuit"; a
+  // duration typed as "2 weeks—") and produced the exact same
+  // glued-punctuation bug this function exists to prevent: "traveled —
+  // 2 weeks— of waiting" and "a pet named - Biscuit." Confirmed live and
+  // in a real downloaded PDF. Found by a fresh-eyes review 2026-07-27.
   function stripTrailingPunctuation(str) {
     return str
-      .replace(/[\s.!?,;:…"'“”‘’]+$/, '')
-      .replace(/^[\s.!?,;:…"'“”‘’]+/, '');
+      .replace(/[\s.!?,;:…"'“”‘’\-–—]+$/, '')
+      .replace(/^[\s.!?,;:…"'“”‘’\-–—]+/, '');
   }
 
   // helperDetail/howCame are documented in prompts.js as short phrases meant
@@ -1502,18 +1603,41 @@
     // input time; this is the defense-in-depth fallback for corrupted
     // saved state that bypasses that check).
     const name = (a.childName && stripTrailingPunctuation(a.childName.trim())) || 'your child';
-    const title = a.bookTitle && a.bookTitle.trim() ? a.bookTitle.trim() : st.defaultTitle;
+    // Same strip-then-check shape as `name` just above — bookTitle is not a
+    // required field (allRequiredFilled() never blocks it), so a
+    // punctuation-only value (e.g. "...") reached the real downloaded PDF
+    // unguarded: it became both the cover-page title text and the embedded
+    // PDF document title (doc.setProperties()). Found by a fresh-eyes
+    // review 2026-07-27.
+    const title = (a.bookTitle && stripTrailingPunctuation(a.bookTitle.trim())) || st.defaultTitle;
     const season = a.season || 'spring';
     const parents = getParentsList(a);
     const siblings = getSiblingNames(a);
     const pet = a.petName && a.petName.trim() ? stripTrailingPunctuation(a.petName.trim()) : '';
     const parentsPhrase = joinWithAnd(parents) || 'a family';
 
-    const members = [
-      ...parents.map(withIndefiniteArticle),
-      ...siblings.map(withIndefiniteArticle),
-      ...(pet ? ['a pet named ' + pet] : []),
-    ];
+    // withIndefiniteArticle() was applied to `parents` only, on the theory
+    // that a parent entry is always a role word ("a Mommy", "a Grandma" —
+    // fairy-tale-style generic titles), unlike a sibling's real proper name
+    // ("a Danny" reads as nonsense — fixed earlier the same day this
+    // comment was written). But `parents` isn't guaranteed to be a role
+    // word at all: `getParentsList()` reads straight from
+    // `parentsLabelCustom` free text when parentsLabel is "Other" — nothing
+    // stops a parent from typing actual first names there ("Susan and
+    // David"), reproducing the identical "a" + proper-name defect the
+    // sibling fix just eliminated. And every OTHER page that mentions
+    // parents (buildOriginSentence, the journey/held/headed-home pages,
+    // family-portrait, just below) already uses the bare `parentsPhrase` —
+    // no article, even for the built-in role-word presets like "Mommy and
+    // Daddy" — so this page was the ONLY place an article was ever added
+    // for parents, not just for siblings. Removing it here instead makes
+    // every family member (parents, siblings, pet) consistent with how the
+    // rest of the book already refers to them, and closes the custom-label
+    // gap without needing to distinguish "role word" from "proper name" —
+    // a distinction the app has no reliable way to make from text alone.
+    // Found by a fresh-eyes review 2026-07-27, following up the
+    // just-shipped sibling fix the same day.
+    const members = [...parents, ...siblings, ...(pet ? ['a pet named ' + pet] : [])];
 
     // Kinship adoption's own origin sentence (buildOriginSentence) is built on
     // an "already loved [name]" premise — a pre-existing relationship, not a
@@ -1541,8 +1665,8 @@
       title: title,
       subtitle: 'A story for ' + name,
       motif: 'rainbow',
-      photo: a.childPhoto || null,
-      useAvatar: !a.childPhoto,
+      photo: isValidPhotoDataUrl(a.childPhoto) ? a.childPhoto : null,
+      useAvatar: !isValidPhotoDataUrl(a.childPhoto),
     });
 
     // "[name], ready for the world" reads as a newborn/first-arrival scene —
@@ -1733,7 +1857,13 @@
       motif: 'heart',
     });
 
-    if (a.promise && a.promise.trim()) {
+    // Same punctuation-only guard as joyfulDetail/signOff above — promise
+    // IS required, so allRequiredFilled() already blocks a punctuation-only
+    // value from reaching an actual download, but this page-inclusion check
+    // never got the matching guard, so the live preview (seen immediately,
+    // before Download is even attempted) still rendered a broken "Our
+    // promise to you" / "..." page. Found by a fresh-eyes review 2026-07-27.
+    if (a.promise && stripTrailingPunctuation(a.promise.trim())) {
       pages.push({ pageId: 'promise', kind: 'text', label: 'Our promise to you', text: a.promise.trim(), motif: 'heart' });
     }
 
@@ -1900,8 +2030,22 @@
       els.preview.appendChild(s);
     }
 
-    els.pageLabel.textContent = 'Page ' + (state.previewIndex + 1) + ' of ' + pages.length +
+    // #page-label is role="status" aria-live="polite" — assigning
+    // .textContent unconditionally always replaces the underlying text
+    // node (even when the new string is byte-identical to the old one),
+    // which is exactly the DOM mutation assistive tech watches for on a
+    // live region. renderPreview() runs on every keystroke in every field
+    // (via onFieldChange()), not just on Prev/Next navigation, so typing
+    // anywhere re-announced "Page X of Y" after every character with no
+    // page actually turning. This is the same chatter failure mode
+    // #page-announcer was deliberately designed around from the start (see
+    // movePreview()'s own comment) — just never applied here. Found by a
+    // fresh-eyes review 2026-07-28.
+    const nextPageLabelText = 'Page ' + (state.previewIndex + 1) + ' of ' + pages.length +
       (page.label ? ' — ' + isolateRtlForDisplay(page.label) : '');
+    if (nextPageLabelText !== els.pageLabel.textContent) {
+      els.pageLabel.textContent = nextPageLabelText;
+    }
     els.prevBtn.disabled = state.previewIndex === 0;
     els.nextBtn.disabled = state.previewIndex === pages.length - 1;
 
@@ -2037,9 +2181,23 @@
   // hint without ever resolving the contradiction. Found by a fresh-eyes
   // review 2026-07-23. Centralizing the hint update here means both call
   // sites automatically respect the error banner's current state.
+  // #download-hint is role="status" aria-live="polite", and this is called
+  // from renderPreview() on every keystroke in every field, not just when
+  // its own text should actually change — assigning .textContent
+  // unconditionally always replaces the underlying text node (even when
+  // the new string is identical to the old one), which is the DOM
+  // mutation assistive tech watches for on a live region. setLiveText()
+  // only reassigns when the value actually differs, so typing in an
+  // unrelated field no longer re-announces "Your book is ready." after
+  // every character. Same fix/reasoning as #page-label just above; found
+  // by the same fresh-eyes review 2026-07-28.
+  function setLiveText(el, text) {
+    if (el.textContent !== text) el.textContent = text;
+  }
+
   function updateDownloadHint() {
     if (els.downloadError && !els.downloadError.hidden) {
-      els.downloadHint.textContent = '';
+      setLiveText(els.downloadHint, '');
       return;
     }
     // Without this, a Prev/Next click mid-generation (renderPreview() calls
@@ -2048,16 +2206,16 @@
     // reads "Generating your book…" — the same disagreeing-UI-regions class
     // already fixed for other banners.
     if (isGeneratingPdf) {
-      els.downloadHint.textContent = 'Generating your book — this can take a few seconds for a longer story.';
+      setLiveText(els.downloadHint, 'Generating your book — this can take a few seconds for a longer story.');
       return;
     }
     if (pendingPhotoUploads > 0) {
-      els.downloadHint.textContent = "Still processing your photo — just a moment.";
+      setLiveText(els.downloadHint, "Still processing your photo — just a moment.");
       return;
     }
-    els.downloadHint.textContent = els.downloadBtn.disabled
+    setLiveText(els.downloadHint, els.downloadBtn.disabled
       ? 'Fill in the required prompts above to unlock your download.'
-      : 'Your book is ready.';
+      : 'Your book is ready.');
   }
 
   function movePreview(delta) {

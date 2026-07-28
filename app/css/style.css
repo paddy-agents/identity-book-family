@@ -488,6 +488,22 @@ footer.site {
     forced-color-adjust: none;
   }
 
+  /* The normal (non-forced-colors) :hover feedback for these same 3
+     controls is border-color/box-shadow only — also suppressed here, so a
+     mouse-hovering forced-colors user saw zero visual feedback while every
+     other user does. Thinner + no offset than .selected's outline so the
+     two states stay visually distinct from each other. Declared BEFORE
+     .selected below (equal specificity — 1 class + 1 pseudo-class each) so
+     hovering an already-selected element keeps the stronger .selected
+     outline, matching the normal-mode precedent (.swatch.selected's
+     box-shadow is likewise declared after .swatch:hover's) instead of
+     shrinking it. */
+  .swatch:hover,
+  .style-btn:hover,
+  .story-type-card:hover {
+    outline: 1px solid Highlight;
+  }
+
   /* border-color + box-shadow/background (the normal .selected look) are
      both suppressed under forced-colors, making selected and unselected
      options render identically. Highlight is a forced-colors system
@@ -539,6 +555,11 @@ footer.site {
   background: var(--soft);
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.noscript-notice h1 {
+  font-size: 1.15rem;
+  margin: 0 0 0.5rem;
 }
 
 .noscript-notice p {

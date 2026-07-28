@@ -109,10 +109,21 @@
       // collapse to as low as ~1.4:1 contrast (need 3:1) — nearly invisible
       // against the swaddle. Hair has no stroke elsewhere by design (fill
       // alone normally carries enough contrast), but these two styles need
-      // one specifically for this reason — reusing the same dark stroke
-      // color already proven >=3:1 against every SOFT and WARM value in
-      // drawFace's own head-outline. Found by a fresh-eyes review 2026-07-27.
-      ctx.strokeStyle = '#4a3626';
+      // one specifically for this reason. The 2026-07-27 fix reused
+      // drawFace's own '#4a3626' head-outline stroke on the claim it was
+      // "already proven >=3:1 against every SOFT and WARM value" — true for
+      // 3 of 4 themes but NOT the ivf theme's purple WARM ([142,110,168]),
+      // which only reaches ~2.68:1 (verified by rendering the real ivf baby
+      // scene and sampling the actual painted pixels, not just computing
+      // theme constants). drawFace's own two uses of '#4a3626' (the head
+      // outline vs SOFT, and the eye stroke vs skin tones) both keep large
+      // margins and are unaffected by this bug, so this stroke is a
+      // dedicated, darker color scoped to just this WARM-adjacent case
+      // rather than darkening the shared constant everywhere (which several
+      // existing regression tests pin to the exact '#4a3626'/(74,54,38)
+      // value at those other two sites). Min contrast across all 4 themes'
+      // WARM is now 4.08:1. Found by a fresh-eyes review 2026-07-28.
+      ctx.strokeStyle = '#241810';
       ctx.lineWidth = Math.max(1, r * 0.025);
     }
     if (style === 'long') {
@@ -132,15 +143,20 @@
     if (style === 'pigtails') {
       // A theoretical farthest-point calculation on these constants alone
       // puts this hairstyle at ~99% of the 'face' scene's circular clip
-      // radius (size*0.5) — the tightest margin of any hairstyle. Checked
-      // empirically anyway (a canvas alpha>10 scan against the clip circle
-      // at size 160/300/625, matching every real render size the 'face'
-      // scene is actually used at) and it comes back with zero stray pixels
-      // at all three — re-confirmed 2026-07-24, same conclusion as
-      // 2026-07-23's and 2026-07-19's earlier checks. Don't re-flag this
-      // from the math alone without a fresh render-and-measure — the
-      // theoretical estimate doesn't match reality here, for reasons not
-      // worth chasing further.
+      // radius (size*0.5) — the tightest margin of any hairstyle. This
+      // margin held with zero measured stray pixels through several
+      // render-and-measure checks (2026-07-19/23/24) — but the same-day
+      // stroke added just above (2026-07-27, for baby-scene swaddle
+      // contrast) narrows it further: half the new stroke width now pushes
+      // the true edge a sub-pixel amount (well under 1.5px even at the
+      // largest 625px real render size) past the clip circle. Re-verified
+      // via an actual circular clip render (matching CSS border-radius:50%/
+      // PDF doc.clip()) that this produces no visible artifact — clip
+      // antialiasing fully absorbs it. Left as-is rather than retune the
+      // bump geometry (which HAIR_SOLO_EXTRA_HALF_WIDTH below is separately
+      // tuned against) for an invisible sub-pixel effect; re-verify with a
+      // fresh render if this area changes again, don't trust this comment's
+      // numbers indefinitely. Found by a fresh-eyes review 2026-07-27.
       [-1, 1].forEach((side) => {
         ctx.beginPath();
         ctx.arc(cx + side * r * 1.05, cy + r * 0.25, r * 0.3, 0, Math.PI * 2);
@@ -214,6 +230,14 @@
     // ordering above. Found by a fresh-eyes review 2026-07-25 (rendered and
     // measured: pigtails covered ~79% of the ear's area).
     ctx.fillStyle = skin;
+    // drawHair() (just called above) leaves ctx.strokeStyle set to the
+    // dedicated '#241810' hair-boundary color for the 'long'/'pigtails'
+    // styles (added 2026-07-28) and never restores it — without resetting
+    // here, the ear outline below silently inherited that color instead of
+    // the intended '#4a3626' for those two styles specifically. Not a WCAG
+    // failure ('#241810' has even higher contrast), but a real, unintended
+    // color-consistency leak. Found by a fresh-eyes review 2026-07-28.
+    ctx.strokeStyle = '#4a3626';
     [-1, 1].forEach((side) => {
       ctx.beginPath();
       ctx.arc(cx + side * r * 0.98, cy + r * 0.05, r * 0.16, 0, Math.PI * 2);
@@ -394,23 +418,34 @@
       // same fix shape, just for this combo. Found by a fresh-eyes review
       // 2026-07-25.
       const soloDuo = parentCount === 1 && !siblingCount;
-      // The 0.084 shift below was derived from the face-WITH-EARS half-width
-      // (~0.171*size, ears reaching 1.14r) as the "widest" case — but two
+      // This shift was 0.084 when the face radius (see drawFace call below)
+      // was size*0.15 — re-derived to 0.109 for the smaller size*0.105 radius
+      // (2026-07-28's face-size proportion fix) by rendering and re-measuring
+      // the actual bounding box, not by scaling the old constant by the
+      // radius ratio: the parent silhouette's own size didn't change, so the
+      // balance point between a shrunk face and an unchanged parent isn't a
+      // simple linear rescale.
+      //
+      // Originally derived from the face-WITH-EARS half-width
       // hairstyles' own shapes reach further than that baseline: 'pigtails'
       // side bumps reach 1.35r (~0.2025*size, see the 0.28 ground-line-
-      // clearance comment below), 0.0315*size wider than the ear baseline
-      // (measured 1.14:1 imbalance at both real render sizes before
-      // compensation — a real proportional effect, not rounding noise,
-      // found by a fresh-eyes review 2026-07-25). 'curly's 7 tuft circles
-      // (see drawHair's curly branch) reach ~1.184r at their two outermost
-      // tufts (cos(18°)*r*0.95 + r*0.28), a smaller but still real and
-      // proportional ~3px@500px/6px@1042px imbalance — under
-      // pigtails' original magnitude, which is why it went unnoticed until
-      // a fresh-eyes review specifically re-checked every hairstyle against
-      // this same fix, not just the one that originally triggered it.
-      // Found 2026-07-26. Halved into the shift using the same
-      // bounding-box-symmetry derivation as the base constant.
-      const HAIR_SOLO_EXTRA_HALF_WIDTH = { pigtails: 0.0315, curly: 0.006 };
+      // clearance comment below). 'curly's 7 tuft circles (see drawHair's
+      // curly branch) reach ~1.184r at their two outermost tufts
+      // (cos(18°)*r*0.95 + r*0.28), a smaller but still real and
+      // proportional effect. Both need extra correction beyond the base
+      // shift above, halved into it using the same bounding-box-symmetry
+      // derivation.
+      //
+      // The 2026-07-28 face-radius cut claimed (wrongly) that this
+      // per-hairstyle table "stays within tolerance at the new value" —
+      // it didn't re-render pigtails specifically. A fresh-eyes review the
+      // same day found pigtails' own constant (0.0315, derived against the
+      // OLD size*0.15 radius) was stale: at the new size*0.105 radius it
+      // left a real ~5px@1042px / ~2px@500px residual imbalance (measured,
+      // not estimated). Re-derived to 0.022 by rendering and re-measuring
+      // the actual bounding box at both real sizes — 'curly's constant
+      // (0.006) was checked the same way and found still correct as-is.
+      const HAIR_SOLO_EXTRA_HALF_WIDTH = { pigtails: 0.022, curly: 0.006 };
       const soloExtraHalfWidth = (HAIR_SOLO_EXTRA_HALF_WIDTH[avatar.hairStyle] || 0) * size;
       // 2 parents + 1 sibling is the app's own DEFAULT combo (parentsLabel
       // defaults to "Mommy and Daddy") the instant a family has any
@@ -427,7 +462,7 @@
       // fresh-eyes review 2026-07-25.
       const twoParentWithSibling = parentCount === 2 && siblingCount;
       let faceCx = cx;
-      if (soloDuo) faceCx = cx + size * 0.084 - soloExtraHalfWidth / 2;
+      if (soloDuo) faceCx = cx + size * 0.109 - soloExtraHalfWidth / 2;
       if (twoParentWithSibling) faceCx = cx - size * 0.0586;
       // Ground line is drawn BEFORE the silhouettes so their feet sit on top
       // of it, not the other way round — the line's color (warmHex) differs
@@ -467,7 +502,34 @@
       // fix exists to remove.
       const siblingOffset = parentCount === 2 ? 0.42 : 0.3;
       if (siblingCount) drawPersonSilhouette(ctx, faceCx + size * siblingOffset, groundY, 0.62, warmDarkHex, size);
-      drawFace(ctx, faceCx, groundY - size * 0.17, size * 0.15, avatar);
+      // Radius was originally size*0.15 (75px @ 500px canvas) — bigger than
+      // an ENTIRE parent silhouette (head+body spans only ~116px top-to-
+      // bottom at scale=1), so the child rendered as a giant disembodied
+      // head towering over two Fisher-Price-scale parent figures on the
+      // book's emotionally significant closing page, in every single
+      // downloaded book. This ratio was never actually compared against the
+      // parent figure's own size in the ~160 prior QA rounds that DID tune
+      // this scene extensively (centering, contrast, draw order) — those
+      // were all about symmetry/visibility, not raw proportion. Reduced to
+      // 0.105 (comparable to, slightly smaller than, the parent figure's
+      // total height); re-verified via direct rendering that the reduction
+      // doesn't introduce any overlap (every clearance constant below was
+      // tuned for the bigger, more overlap-prone face, so a smaller face
+      // only gains slack, never loses it). Found by a fresh-eyes review
+      // 2026-07-28.
+      //
+      // The vertical offset (groundY - size*K) was tuned so the chin lands
+      // just above groundY, matching where the parent silhouettes' own feet
+      // sit — but it's a function of the radius above it (chin = cy + r),
+      // and the radius cut above was never re-derived against it: with the
+      // old r=0.15 and K=0.17, chin landed at groundY-0.02*size (touching
+      // the ground); with the new r=0.105 and the same K=0.17, the chin
+      // floated at groundY-0.065*size — a literal gap 3x wider, reading as
+      // a disembodied head hovering above the ground line rather than
+      // standing on it. Re-derived K=0.125 so the chin returns to the same
+      // groundY-0.02*size the scene was always tuned around. Found by a
+      // fresh-eyes review the same day as the radius cut above.
+      drawFace(ctx, faceCx, groundY - size * 0.125, size * 0.105, avatar);
       return canvas.toDataURL('image/png');
     }
 

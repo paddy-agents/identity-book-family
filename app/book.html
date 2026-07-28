@@ -46,7 +46,7 @@
   <main class="wrap">
     <noscript>
       <div class="noscript-notice">
-        <p><strong>This page needs JavaScript to work.</strong></p>
+        <h1>This page needs JavaScript to work.</h1>
         <p>Origin Stories builds your book live in your browser as you type, so
         it can't work with JavaScript turned off. Please enable JavaScript in
         your browser settings and reload this page to continue.</p>
@@ -56,8 +56,13 @@
            present tense ("preview your book as you go... download it as a
            keepsake PDF") — directly contradicting the notice above it,
            which says the page "can't work with JavaScript turned off", if
-           left visible. Found by a fresh-eyes review 2026-07-24. */
-        .story-type-heading, #story-types, .lede { display: none; }
+           left visible. Found by a fresh-eyes review 2026-07-24. .hero
+           ("Tell your child's story") has the same problem — it's the
+           page's own call to action to start a flow the notice just said
+           can't work, and hiding .lede alone left it dangling above an
+           empty gap with nothing under it. Found by a fresh-eyes review
+           2026-07-27. */
+        .story-type-heading, #story-types, .lede, .hero { display: none; }
         /* Without this, printing/print-previewing this page with JS off
            shows this notice AND the unconditional ".print-only" redirect
            message ("go click Download...") at the same time — advice
