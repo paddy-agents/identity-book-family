@@ -441,9 +441,11 @@ footer.site {
      information, but here that same subtlety made the two lightest skin
      tones ('light'/'fair') render as edge-less, barely-visible blobs (as low
      as ~1.0:1 border-vs-fill contrast in every theme). --ink is fixed
-     (doesn't vary per theme) and clears >=3:1 against every skin/hair/eye
-     swatch color except 'deep' skin, whose fill already contrasts ~6.9:1
-     against the page on its own. */
+     (doesn't vary per theme) and clears >=3:1 against most skin/hair/eye
+     swatch colors; several dark ones (deep skin, black/brown hair or eyes)
+     fall short of 3:1 against --ink specifically, but those fills already
+     contrast well against the page itself (>=5.5:1) so the swatch still
+     reads as a clearly visible solid circle without relying on the border. */
   border: 2px solid var(--ink);
   padding: 0;
   cursor: pointer;

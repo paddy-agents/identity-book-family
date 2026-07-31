@@ -25,6 +25,16 @@
   // shows a broken state. Found by a fresh-eyes review 2026-07-28.
   const photoUploadErrorShown = {};
 
+  // Tracks, per photo field id, whether the currently-shown error banner has
+  // already been announced once (via role="alert") since it was last raised.
+  // buildPhotoUpload() recreates the whole widget from scratch on every
+  // renderFields() rebuild -- including ones triggered by a totally unrelated
+  // field change (numSiblings/parentsLabel/adoptionPath/...) -- so without
+  // this, a screen reader re-announces the error every single time, since
+  // each rebuild inserts a brand-new role="alert" node already populated with
+  // the visible error text. Found by a fresh-eyes review 2026-07-29.
+  const photoUploadErrorAnnounced = {};
+
   // True from the moment Download disables its button until buildAndSaveDoc()
   // finishes (two requestAnimationFrame callbacks later — see downloadBook()).
   // A blocking confirm()/alert() dialog pauses queued rAF callbacks along with
@@ -398,6 +408,7 @@
     // "Remove photo" button uses for one field, applied to all of them here.
     Object.keys(photoUploadSeq).forEach((id) => { photoUploadSeq[id] = (photoUploadSeq[id] || 0) + 1; });
     Object.keys(photoUploadErrorShown).forEach((id) => { photoUploadErrorShown[id] = false; });
+    Object.keys(photoUploadErrorAnnounced).forEach((id) => { photoUploadErrorAnnounced[id] = false; });
     [...els.storyTypes.children].forEach((card) => {
       card.classList.remove('selected');
       card.setAttribute('aria-pressed', 'false');
@@ -1052,7 +1063,17 @@
     const errorMsg = document.createElement('p');
     errorMsg.className = 'photo-upload-error';
     errorMsg.id = 'field-' + f.id + '-error';
-    errorMsg.setAttribute('role', 'alert');
+    // Only mark this a live role="alert" region when the current error
+    // occurrence hasn't already been announced once (see
+    // photoUploadErrorAnnounced's own comment) — otherwise every unrelated
+    // renderFields() rebuild while the error stays showing would insert a
+    // brand-new alert node already containing the visible text, which most
+    // screen readers treat as a fresh alert and re-announce. The genuine
+    // first reveal (below, where photoUploadErrorAnnounced[f.id] is set
+    // true) still gets role="alert" here so it announces correctly once.
+    if (!photoUploadErrorAnnounced[f.id]) {
+      errorMsg.setAttribute('role', 'alert');
+    }
     // Reflects whatever the last upload attempt for this field actually did
     // (see photoUploadErrorShown's own comment) rather than always starting
     // hidden — otherwise any unrelated renderFields() rebuild while an error
@@ -1070,6 +1091,7 @@
       if (!file) return;
       errorMsg.hidden = true;
       photoUploadErrorShown[f.id] = false;
+      photoUploadErrorAnnounced[f.id] = false;
       const mySeq = (photoUploadSeq[f.id] = (photoUploadSeq[f.id] || 0) + 1);
       // Disable Download for the duration of this crop — see
       // pendingPhotoUploads' own comment for why.
@@ -1100,6 +1122,7 @@
           const liveInput = document.getElementById('field-' + f.id);
           const liveError = document.getElementById('field-' + f.id + '-error');
           photoUploadErrorShown[f.id] = true;
+          photoUploadErrorAnnounced[f.id] = true;
           if (liveInput) liveInput.value = '';
           if (liveError) liveError.hidden = false;
           renderPreview();
@@ -1120,6 +1143,7 @@
       // resolve after the removal and silently bring the photo back.
       photoUploadSeq[f.id] = (photoUploadSeq[f.id] || 0) + 1;
       photoUploadErrorShown[f.id] = false;
+      photoUploadErrorAnnounced[f.id] = false;
       delete state.answers[f.id];
       renderFields();
       renderPreview();
@@ -1517,7 +1541,80 @@
   // glued-punctuation bug this function exists to prevent: "traveled —
   // 2 weeks— of waiting" and "a pet named - Biscuit." Confirmed live and
   // in a real downloaded PDF. Found by a fresh-eyes review 2026-07-27.
+  //
+  // Every fix above treats a trailing period as redundant sentence-closer
+  // punctuation to discard — but a lone trailing period can also be
+  // semantically part of the text itself, as a real abbreviation:
+  // "Washington, D.C." lost its meaningful final period, silently reading
+  // as a typo/truncation once spliced ("...traveled to Washington, D.C to
+  // bring Maya home."). There's no fully reliable spelling-only way to
+  // tell "a real abbreviation" from "a name someone ended with a
+  // redundant period" (this app already declines to guess at the
+  // analogous a/an vowel-sound ambiguity for the same reason) — a single
+  // trailing period after a short (<=4 letter) trailing word ALONE isn't
+  // reliable enough (an earlier version of this fix tried that and broke
+  // a real existing test: "Mama Jo." is a plain short name, not an
+  // abbreviation, and would have wrongly kept its period). The one signal
+  // reliable enough to act on is an internal period within the trailing
+  // token itself — an initialism shape like "D.C"/"p.m"/"a.m"/"U.S" that a
+  // plain word never has — so only that narrower case is left alone; the
+  // "Danny Jr."/"St. Louis, Mo." single-internal-word-abbreviation case is
+  // a known, accepted gap (still stripped, same as before this fix) rather
+  // than risk more name collisions. Found by a fresh-eyes review
+  // 2026-07-28.
+  //
+  // The check above only recognized an abbreviation when the string's own
+  // LITERAL last character was the abbreviation's period — so any other
+  // trailing punctuation after it (a stray closing quote from a paste, a
+  // trailing "!"/","/":") silently failed the check and fell through to
+  // the generic strip, eating the abbreviation's own period right along
+  // with the extra character ("Washington, D.C.\"" -> "Washington, D.C",
+  // reopening the exact bug this whole function exists to prevent). Fixed
+  // by detecting the abbreviation shape on the string with trailing
+  // "wrapper" punctuation (not periods) peeled off first, and stripping
+  // that same wrapper run — but not the abbreviation's real period — when
+  // the abbreviation branch is taken. Found by a fresh-eyes review
+  // 2026-07-28 (same day, same run as the fix above).
+  //
+  // The shape regex below anchors on `(?:^|\s)` immediately before the
+  // abbreviation's first letter — but only TRAILING wrapper punctuation was
+  // ever peeled off before that test, not leading. A value that IS the
+  // abbreviation (or starts with it) with a leading wrapper character stuck
+  // directly against it — a quote from a paste ('"D.C."'), or a dash from a
+  // bulleted-list paste ("-D.C.") — has neither true string-start nor
+  // whitespace right before "D", so the test wrongly returned false and the
+  // abbreviation's real period was eaten by the generic branch instead
+  // ('"D.C."' -> '"D.C"'). Fixed by peeling leading wrapper punctuation
+  // before the shape test too, mirroring the trailing side. Found by a
+  // fresh-eyes review 2026-07-28 (later the same day).
+  //
+  // The shape regex's own leading anchor was `(?:^|\s)` -- string-start or
+  // a literal whitespace character right before the abbreviation's first
+  // letter. That excludes an interior separator glued directly onto the
+  // abbreviation with no space, e.g. "Washington,D.C." (a common way to
+  // type it, just omitting the space after the comma) -- there's no
+  // whitespace before "D", so the check wrongly returned false and the
+  // real period was eaten by the generic branch: "Washington,D.C." ->
+  // "Washington,D.C". Fixed by widening the anchor to "string-start, or any
+  // non-letter character" instead of just whitespace -- this still rejects
+  // a mid-word false match like "MAD.C." (the "D" there is preceded by the
+  // letter "A", not a separator), which is the reason this anchor exists in
+  // the first place. Found by a fresh-eyes review 2026-07-31.
+  function looksLikeAbbreviation(str) {
+    const core = str
+      .replace(/[\s!?,;:…"'“”‘’\-–—]+$/, '')
+      .replace(/^[\s!?,;:…"'“”‘’\-–—]+/, '');
+    if (!/\.$/.test(core)) return false;
+    if (/[\s.!?,;:…"'“”‘’\-–—]{2,}$/.test(core)) return false;
+    return /(?:^|[^A-Za-z])[A-Za-z]\.[A-Za-z](?:\.[A-Za-z])*\.$/.test(core);
+  }
+
   function stripTrailingPunctuation(str) {
+    if (looksLikeAbbreviation(str)) {
+      return str
+        .replace(/[\s!?,;:…"'“”‘’\-–—]+$/, '')
+        .replace(/^[\s.!?,;:…"'“”‘’\-–—]+/, '');
+    }
     return str
       .replace(/[\s.!?,;:…"'“”‘’\-–—]+$/, '')
       .replace(/^[\s.!?,;:…"'“”‘’\-–—]+/, '');
@@ -2063,13 +2160,22 @@
       // either side — the same bidi-reordering problem already fixed for
       // .page-label-inline, just missed for this banner: without isolate
       // marks the quoted list visually reorders into an unreadable jumble.
-      els.charsetWarning.textContent = 'Heads up: the downloadable PDF can only display Latin/European ' +
+      //
+      // #charset-warning is role="status" aria-live="polite", and this runs
+      // on every keystroke in every field via renderPreview() — a direct
+      // .textContent assignment always replaces the text node even when the
+      // string is byte-identical to what's already there, re-announcing the
+      // whole warning after every subsequent keystroke anywhere in the form
+      // for the rest of the session. #page-label/#download-hint got the same
+      // fix (setLiveText()) earlier the same day this banner was missed.
+      // Found by a fresh-eyes review 2026-07-28 (later the same day).
+      setLiveText(els.charsetWarning, 'Heads up: the downloadable PDF can only display Latin/European ' +
         'letters right now, so ' + badChars.map((c) => '"' + isolateRtlForDisplay(c) + '"').join(', ') +
         ' will come out as garbled symbols in your download, even though it looks right here in the preview. ' +
-        "We're sorry about that — wider language support is on our list.";
+        "We're sorry about that — wider language support is on our list.");
     } else {
       els.charsetWarning.hidden = true;
-      els.charsetWarning.textContent = '';
+      setLiveText(els.charsetWarning, '');
     }
   }
 
