@@ -46,11 +46,26 @@ body[data-theme='blended'] {
 html, body {
   margin: 0;
   padding: 0;
-  background: var(--cream);
   color: var(--ink);
   font-family: var(--font-body);
   line-height: 1.55;
   transition: background 0.2s ease;
+}
+
+/* Only `body` gets `--cream` re-themed per story type (see
+   body[data-theme='...'] above) -- CSS custom properties don't cascade
+   UPWARD, so if `html` also declared its own `background: var(--cream)`
+   it would resolve against :root's default and never re-theme, even
+   though `body`'s own background looks correct. Per the CSS spec, the
+   browser paints the actual viewport/scrollbar-overscroll canvas from the
+   ROOT element's background when it has one -- so declaring it on `html`
+   left a wrong-colored strip visible below short content and during
+   elastic overscroll bounce on any of the 3 non-default themes. Leaving
+   `html` with no background at all makes the browser fall back to
+   `body`'s, which already resolves correctly per-theme. Found by a
+   fresh-eyes review 2026-08-01. */
+body {
+  background: var(--cream);
 }
 
 a { color: var(--warm-dark); }
@@ -516,6 +531,17 @@ footer.site {
     outline: 3px solid Highlight;
     outline-offset: 2px;
   }
+
+  /* .btn (the primary CTA — "Download your book (PDF)" / "Start your
+     story") sets `border: none`, relying entirely on its background/color
+     for shape — both suppressed under forced-colors, leaving it as
+     unstyled text with no button affordance at all. .btn.secondary
+     already survives this because it sets its own explicit border, which
+     forced-colors preserves; give .btn the same explicit (normally
+     invisible) border so forced-colors has something to render. */
+  .btn {
+    border: 1.5px solid ButtonText;
+  }
 }
 
 .book-preview .page-label-inline {
@@ -598,5 +624,19 @@ footer.site {
     margin: 3rem auto;
     text-align: center;
     font-family: var(--font-body, sans-serif);
+  }
+
+  /* Browsers default "print backgrounds" to OFF, which drops .btn's
+     var(--warm-dark) fill and leaves its white text unreadable on the bare
+     page (verified via a real page.pdf({printBackground:false}) render).
+     Border-color survives fine without background graphics (unlike fill),
+     so fall back to .btn.secondary's already-print-safe look: no
+     background, a visible border, and dark text. Only reachable on
+     index.html in practice — book.html's own .btn instances are already
+     inside the hidden body.book-page selectors above. */
+  .btn {
+    background: none !important;
+    color: var(--ink) !important;
+    border: 1.5px solid var(--ink) !important;
   }
 }

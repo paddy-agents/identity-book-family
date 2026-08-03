@@ -443,9 +443,20 @@
       // OLD size*0.15 radius) was stale: at the new size*0.105 radius it
       // left a real ~5px@1042px / ~2px@500px residual imbalance (measured,
       // not estimated). Re-derived to 0.022 by rendering and re-measuring
-      // the actual bounding box at both real sizes — 'curly's constant
-      // (0.006) was checked the same way and found still correct as-is.
-      const HAIR_SOLO_EXTRA_HALF_WIDTH = { pigtails: 0.022, curly: 0.006 };
+      // the actual bounding box at both real sizes.
+      //
+      // 'curly's constant (0.006, same original derivation) was ALSO stale —
+      // the same-day claim of "checked and found correct as-is" turned out
+      // to be wrong too (found 2026-07-31 by a fresh-eyes review, confirmed
+      // independently by re-rendering and pixel-scanning the group's
+      // bounding box at both real sizes: bald/short/long/bun/pigtails all
+      // land within a ~1px left/right margin of each other at 1042px — pure
+      // antialiasing noise — while curly at 0.006 measured a real ~4px
+      // excess). Re-derived empirically the same way as pigtails (binary-
+      // searching candidate values and re-rendering, not just scaling the
+      // geometric estimate) to 0.003, which lands curly back inside that
+      // same ~1px noise floor at both 500px and 1042px.
+      const HAIR_SOLO_EXTRA_HALF_WIDTH = { pigtails: 0.022, curly: 0.003 };
       const soloExtraHalfWidth = (HAIR_SOLO_EXTRA_HALF_WIDTH[avatar.hairStyle] || 0) * size;
       // 2 parents + 1 sibling is the app's own DEFAULT combo (parentsLabel
       // defaults to "Mommy and Daddy") the instant a family has any
@@ -461,9 +472,11 @@
       // soloDuo above, just for a different lopsided combo. Found by a
       // fresh-eyes review 2026-07-25.
       const twoParentWithSibling = parentCount === 2 && siblingCount;
+      const soloWithSibling = parentCount === 1 && siblingCount;
       let faceCx = cx;
       if (soloDuo) faceCx = cx + size * 0.109 - soloExtraHalfWidth / 2;
       if (twoParentWithSibling) faceCx = cx - size * 0.0586;
+      if (soloWithSibling) faceCx = cx + size * 0.001;
       // Ground line is drawn BEFORE the silhouettes so their feet sit on top
       // of it, not the other way round — the line's color (warmHex) differs
       // from the parent silhouettes' fill (warmDarkHex), and stroking the

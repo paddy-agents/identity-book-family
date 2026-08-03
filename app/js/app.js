@@ -355,9 +355,18 @@
     // newValue is null when the other tab removed the key (Start Over), not
     // edited it — "reload to see the changes" would be misleading there,
     // since reloading actually shows an empty story, not new content.
-    els.tabConflictWarning.textContent = newValue === null
+    // role="alert" (assertive) here, unlike #page-label/#download-hint/
+    // #charset-warning's role="status" — an unconditional .textContent
+    // reassignment on every 'storage' event (which fires on every keystroke
+    // in the OTHER tab, via its own saveProgress()) would re-interrupt a
+    // screen-reader user in THIS tab repeatedly for as long as someone else
+    // keeps typing elsewhere, even though the announced sentence never
+    // changes. setLiveText() only reassigns when the value actually
+    // differs — same fix as the other banners, just missed here (found by
+    // a fresh-eyes review 2026-07-31).
+    setLiveText(els.tabConflictWarning, newValue === null
       ? 'This story was cleared in another open tab (Start a new story). If you keep editing here, your changes will still be overwritten by that — reload this tab to start fresh instead.'
-      : 'This story was just changed in another open tab. If you keep editing here, those changes will be overwritten — reload this tab to see them instead.';
+      : 'This story was just changed in another open tab. If you keep editing here, those changes will be overwritten — reload this tab to see them instead.');
     els.tabConflictWarning.hidden = false;
   }
 
@@ -387,7 +396,17 @@
     // parent does the single most likely thing after seeing it: keeps
     // typing. Only clear it on a successful save — if the save itself
     // failed, the other tab's data is untouched and the warning still holds.
-    if (didSave && els.tabConflictWarning) els.tabConflictWarning.hidden = true;
+    // Clearing the text (not just .hidden) matters here specifically: since
+    // the message only has two variants ("changed" vs "cleared"), hiding it
+    // without clearing left setLiveText() thinking an identical LATER
+    // conflict was a no-op text-wise, so only the (attribute) hidden->false
+    // flip fired, not any text mutation — a real gap in this same-day fix's
+    // own coverage (unlike #charset-warning, which already clears its text
+    // on every hide). Found by a fresh-eyes review 2026-07-31.
+    if (didSave && els.tabConflictWarning) {
+      els.tabConflictWarning.hidden = true;
+      setLiveText(els.tabConflictWarning, '');
+    }
   }
 
   function startOver() {
@@ -421,7 +440,10 @@
     if (els.savedNote) els.savedNote.hidden = true;
     if (els.saveError) els.saveError.hidden = true;
     if (els.downloadError) els.downloadError.hidden = true;
-    if (els.tabConflictWarning) els.tabConflictWarning.hidden = true;
+    if (els.tabConflictWarning) {
+      els.tabConflictWarning.hidden = true;
+      setLiveText(els.tabConflictWarning, '');
+    }
     delete document.body.dataset.theme;
     renderPreview();
   }
@@ -524,7 +546,10 @@
     // overwrite whatever the other tab wrote — the warning's own "your
     // changes will be overwritten" framing would be stale/backwards if left
     // showing past this point (same reasoning startOver() already applies).
-    if (els.tabConflictWarning) els.tabConflictWarning.hidden = true;
+    if (els.tabConflictWarning) {
+      els.tabConflictWarning.hidden = true;
+      setLiveText(els.tabConflictWarning, '');
+    }
     renderFields();
     renderPreview();
     saveProgress();
@@ -954,6 +979,16 @@
               // ("Grandma,Cousin"). Add just the missing space. Found by a
               // fresh-eyes review 2026-07-26.
               before = before + ' ';
+            } else if (before.trim() && !sepEnd.test(before) && sepStart.test(sanitized) && !/^\s/.test(sanitized)) {
+              // The SEPARATOR can also come from the pasted side instead of
+              // `before` — e.g. pasting "and Auntie\nUncle Bob" right after
+              // already-typed "Grandma". `sepStart.test(sanitized)` is true
+              // (the pasted text itself starts with "and "), so the first
+              // branch above correctly skips inserting a redundant ", " —
+              // but nothing then adds the missing space between "Grandma"
+              // and "and", gluing them into "Grandmaand Auntie". Insert just
+              // the missing space. Found by a fresh-eyes review 2026-08-01.
+              sanitized = ' ' + sanitized;
             }
             if (after.trim() && !sepStart.test(after) && !sepEnd.test(sanitized)) {
               after = after.replace(/^[ \t]+/, '');
@@ -963,13 +998,48 @@
               // has no leading space (e.g. the caret sits right before
               // "&Grandpa"). Found by a fresh-eyes review 2026-07-26.
               after = ' ' + after;
+            } else if (after.trim() && !sepStart.test(after) && sepEnd.test(sanitized) && !/\s$/.test(sanitized)) {
+              // Symmetric case: the pasted text's TRAILING word is the
+              // separator (e.g. pasting "Uncle Bob\nGrandma and" right
+              // before already-typed "Grandpa") — sepEnd.test(sanitized) is
+              // true so the first branch above correctly skips a redundant
+              // ", ", but the missing space between "and" and "Grandpa" was
+              // never added, gluing them into "andGrandpa". Found by a
+              // fresh-eyes review 2026-08-01.
+              sanitized = sanitized + ' ';
             }
           } else {
             // General free-text field: there's no delimited-list semantics
-            // to preserve, just avoid an accidental double space where the
-            // paste lands right next to already-existing whitespace.
-            if (before === '' || /\s$/.test(before)) sanitized = sanitized.replace(/^ /, '');
-            if (after === '' || /^\s/.test(after)) sanitized = sanitized.replace(/ $/, '');
+            // to preserve, just a plain space between whatever's already
+            // there and the newly-pasted text. The original version of
+            // this branch only ever avoided an accidental DOUBLE space
+            // (when the boundary already had whitespace) — it never
+            // handled the opposite, more common case: no whitespace on
+            // either side at all, which fused the two straight together
+            // with no separator ("Biscuit" + paste "is our dog..." ->
+            // "Biscuitis our dog...", or pasting into the MIDDLE of
+            // existing text on both sides at once). Found by a fresh-eyes
+            // review 2026-07-31.
+            // A single-character strip/insert (as the fix above first
+            // shipped) only handles a boundary whitespace RUN of exactly
+            // one character — clipboard text that itself starts/ends with
+            // 2+ spaces (a copied indented line, a hanging-indent
+            // paragraph, a list item's leading spaces) still left a stray
+            // multi-space run glued onto the existing content, invisible
+            // in the live preview (HTML collapses whitespace) but a
+            // visibly wider gap in the real downloaded PDF. Collapse the
+            // whole run instead of one character. Found by a fresh-eyes
+            // review 2026-07-31 (same day, follow-up).
+            if (before === '' || /\s$/.test(before)) {
+              sanitized = sanitized.replace(/^\s+/, '');
+            } else {
+              sanitized = sanitized.replace(/^\s*/, ' ');
+            }
+            if (after === '' || /^\s/.test(after)) {
+              sanitized = sanitized.replace(/\s+$/, '');
+            } else {
+              sanitized = sanitized.replace(/\s*$/, ' ');
+            }
           }
           const combined = before + sanitized + after;
           // Programmatically assigning .value (unlike typing or a native
@@ -1124,7 +1194,19 @@
           photoUploadErrorShown[f.id] = true;
           photoUploadErrorAnnounced[f.id] = true;
           if (liveInput) liveInput.value = '';
-          if (liveError) liveError.hidden = false;
+          if (liveError) {
+            liveError.hidden = false;
+            // Mirror buildPhotoUpload()'s own construction-time role
+            // assignment here too — the live DOM node's role can be stale
+            // from a rebuild that happened BEFORE this failure (e.g. an
+            // unrelated field change while a prior error was still
+            // showing, which intentionally omits role="alert" to avoid a
+            // re-announce). Without this, a second/later failure on that
+            // same un-rebuilt node silently never announces, even though
+            // photoUploadErrorAnnounced correctly believes it just did.
+            // Found by a fresh-eyes review 2026-08-01.
+            liveError.setAttribute('role', 'alert');
+          }
           renderPreview();
         }
       );
@@ -1599,26 +1681,48 @@
   // non-letter character" instead of just whitespace -- this still rejects
   // a mid-word false match like "MAD.C." (the "D" there is preceded by the
   // letter "A", not a separator), which is the reason this anchor exists in
-  // the first place. Found by a fresh-eyes review 2026-07-31.
+  // the first place.
+  //
+  // These fixes (2026-07-28 x3, 2026-07-31 x2) each patched one more
+  // specific tail SHAPE that could defeat the abbreviation check: a
+  // trailing non-period wrapper char, a leading wrapper char, an interior
+  // separator glued with no space, extra trailing periods, and a wrapper
+  // char sitting directly before the abbreviation's own trailing period
+  // ("Washington, D.C.\".") -- each one individually closing the exact
+  // same "the abbreviation's own real period gets eaten" bug through a
+  // slightly different route. Per this project's own precedent ("when a
+  // bug class collects 3+ one-off fixes in the same function, stop
+  // patching symptoms and look for the actual root cause"), replaced the
+  // whole peel-then-check approach with a single regex that directly
+  // matches "an abbreviation shape, followed by nothing but wrapper
+  // punctuation/periods running to the end of the string" and captures
+  // just the abbreviation (through its own one real period) -- so ANY
+  // combination/order of trailing junk after a real abbreviation is
+  // handled by construction, not by enumerating cases. Verified equivalent
+  // to the old behavior on all 27 previously-documented cases (including
+  // every fix above) in a standalone Node script before this rewrite, plus
+  // it now also correctly handles combinations no prior fix covered
+  // ("Washington, D.C.,.") for free. Found by a fresh-eyes
+  // review 2026-07-31 (a second, same-day pass over this file).
+  const ABBREVIATION_AT_END_RE =
+    /(?:^|[^A-Za-z])([A-Za-z]\.[A-Za-z](?:\.[A-Za-z])*\.)[\s!?,;:…"'“”‘’\-–—.]*$/d;
+
   function looksLikeAbbreviation(str) {
-    const core = str
-      .replace(/[\s!?,;:…"'“”‘’\-–—]+$/, '')
-      .replace(/^[\s!?,;:…"'“”‘’\-–—]+/, '');
-    if (!/\.$/.test(core)) return false;
-    if (/[\s.!?,;:…"'“”‘’\-–—]{2,}$/.test(core)) return false;
-    return /(?:^|[^A-Za-z])[A-Za-z]\.[A-Za-z](?:\.[A-Za-z])*\.$/.test(core);
+    return ABBREVIATION_AT_END_RE.test(str);
   }
 
   function stripTrailingPunctuation(str) {
-    if (looksLikeAbbreviation(str)) {
+    const m = ABBREVIATION_AT_END_RE.exec(str);
+    if (m) {
       return str
-        .replace(/[\s!?,;:…"'“”‘’\-–—]+$/, '')
+        .slice(0, m.indices[1][1])
         .replace(/^[\s.!?,;:…"'“”‘’\-–—]+/, '');
     }
     return str
       .replace(/[\s.!?,;:…"'“”‘’\-–—]+$/, '')
       .replace(/^[\s.!?,;:…"'“”‘’\-–—]+/, '');
   }
+
 
   // helperDetail/howCame are documented in prompts.js as short phrases meant
   // to be spliced mid-sentence ("a short phrase, starting with a verb"), with
